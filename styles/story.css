@@ -1024,3 +1024,53 @@
         }
         .story-inline-edit-btn-save { color: var(--c-story-accent, #7c6844); font-weight: 500; }
         .story-inline-edit-btn:disabled { opacity: 0.4; cursor: default; }
+
+        /* === 存档区块 === */
+        .story-save-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 10px 12px;
+          background: var(--c-story-panel, rgba(255, 255, 255, 0.5));
+          box-shadow: var(--story-paper-shadow-soft);
+        }
+        .story-save-info {
+          min-width: 0;
+          flex: 1;
+        }
+        .story-save-name {
+          font-size: calc(13px*var(--app-text-scale,1));
+          color: var(--c-story-text, #3a3b3c);
+          font-weight: 500;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .story-save-meta {
+          font-size: calc(10px*var(--app-text-scale,1));
+          color: var(--c-story-sub, #94a3b8);
+          margin-top: 2px;
+          letter-spacing: 0.04em;
+        }
+        .story-save-actions {
+          display: flex;
+          gap: 6px;
+          flex-shrink: 0;
+        }
+        .story-save-action {
+          border: none;
+          border-radius: 0;
+          cursor: pointer;
+          padding: 5px 10px;
+          font-size: calc(11px*var(--app-text-scale,1));
+          background: var(--c-story-panel-active, rgba(255, 255, 255, 0.85));
+          color: var(--c-story-text, #3a3b3c);
+          box-shadow: var(--story-paper-shadow-soft);
+        }
+        .story-save-action:active {
+          transform: scale(0.95);
+        }
+        .story-save-action-danger {
+          color: var(--c-danger, #e74c3c);
+        }

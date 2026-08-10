@@ -56,6 +56,11 @@ import {
   deleteStoryMessage,
   deleteStoryMessagesFrom,
   editStoryMessage,
+  replaceStoryMessages,
+  listStorySaves,
+  createStorySave,
+  deleteStorySave,
+  getStorySave,
   type StoryMessage,
   type StorySession,
   updateStorySession,
@@ -282,6 +287,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [customCssDraft, setCustomCssDraft] = useState("");
   const [foldTagsDraft, setFoldTagsDraft] = useState("");
   const [contextExcludedTagsDraft, setContextExcludedTagsDraft] = useState("");
+  const [saveNameDraft, setSaveNameDraft] = useState("");
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
@@ -321,6 +327,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
   );
   const uiPrefs = currentSession?.uiPrefs || {};
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
+  // 存档开关：默认开启；按角色（会话）独立记忆
+  const saveEnabled = uiPrefs.saveEnabled !== false;
+  const storySaves = activeSessionId ? listStorySaves(activeSessionId) : [];
 
   const markGenerating = useCallback((sessionId: string, on: boolean) => {
     setGeneratingSessionIds((prev) => {
@@ -605,6 +614,51 @@ export function StoryApp({ onClose }: StoryAppProps) {
     setCustomCssDraft(next.customCSS || "");
     setFoldTagsDraft(next.foldTags ?? "think,thinking");
     setContextExcludedTagsDraft(next.contextExcludedTags ?? "think,thinking");
+    setStorageVersion((value) => value + 1);
+  }
+
+  // ── 存档：保存当前进度为一独立快照 ──
+  function handleSaveStory() {
+    if (!currentSession) return;
+    if (isGenerating) { alert("剧情生成中，请稍后再存档"); return; }
+    const name = saveNameDraft.trim() || `存档 ${storySaves.length + 1}`;
+    createStorySave(activeSessionId, name, messages, {
+      foldTags: currentSession.foldTags,
+      contextExcludedTags: currentSession.contextExcludedTags,
+      customCSS: currentSession.customCSS,
+      uiPrefs: currentSession.uiPrefs,
+    });
+    setSaveNameDraft("");
+    setStorageVersion((value) => value + 1);
+  }
+
+  // ── 读档：用存档整份覆盖当前会话（消息 + 会话配置） ──
+  function handleLoadStory(saveId: string) {
+    if (isGenerating) { alert("剧情生成中，请稍后再读档"); return; }
+    const save = getStorySave(saveId);
+    if (!save) return;
+    if (!window.confirm(`读取存档「${save.name}」？\n当前 ${messages.length} 条剧情将被存档内容（${save.messageCount} 条）覆盖，建议先保存当前进度。`)) return;
+    replaceStoryMessages(activeSessionId, save.messages);
+    if (save.sessionSnapshot) {
+      const next = updateStorySession(activeSessionId, save.sessionSnapshot);
+      if (next) {
+        setCustomCssDraft(next.customCSS || "");
+        setFoldTagsDraft(next.foldTags ?? "think,thinking");
+        setContextExcludedTagsDraft(next.contextExcludedTags ?? "think,thinking");
+      }
+    }
+    setMessages(loadStoryMessages(activeSessionId));
+    setVisibleMessageCount(STORY_INITIAL_LOAD);
+    setStorageVersion((value) => value + 1);
+    setDrawerOpen(false);
+  }
+
+  // ── 删除存档 ──
+  function handleDeleteSave(saveId: string) {
+    const save = getStorySave(saveId);
+    if (!save) return;
+    if (!window.confirm(`删除存档「${save.name}」？此操作不可恢复。`)) return;
+    deleteStorySave(saveId);
     setStorageVersion((value) => value + 1);
   }
 
@@ -993,6 +1047,98 @@ export function StoryApp({ onClose }: StoryAppProps) {
               默认 think,thinking；影响后续生成上下文，不影响显示与保存
             </div>
           </div>
+        </div>
+
+        <div className="story-drawer-section">
+          <div className="story-drawer-eyebrow">存档</div>
+
+          <div className="story-pref-row">
+            <span>启用存档</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={saveEnabled}
+              aria-label={saveEnabled ? "关闭存档功能" : "开启存档功能"}
+              onClick={() => applySessionUpdates({ uiPrefs: { ...uiPrefs, saveEnabled: !saveEnabled } })}
+              style={{
+                position: "relative",
+                width: 44,
+                height: 24,
+                borderRadius: 999,
+                border: "none",
+                cursor: "pointer",
+                flexShrink: 0,
+                background: saveEnabled ? "var(--c-story-accent, #7c6844)" : "rgba(0,0,0,0.12)",
+                transition: "background 0.2s ease",
+              }}
+            >
+              <span style={{
+                position: "absolute",
+                top: 3,
+                left: saveEnabled ? 23 : 3,
+                width: 18,
+                height: 18,
+                borderRadius: 999,
+                background: "#fff",
+                boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+                transition: "left 0.2s ease",
+              }} />
+            </button>
+          </div>
+
+          {saveEnabled && (
+            <>
+              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                <input
+                  type="text"
+                  value={saveNameDraft}
+                  onChange={(e) => setSaveNameDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { handleSaveStory(); } }}
+                  placeholder="给这份存档起个名字"
+                  style={{
+                    flex: 1, minWidth: 0, boxSizing: "border-box",
+                    padding: "10px 12px", borderRadius: 0,
+                    border: "none", boxShadow: "inset 0 1px 3px rgba(0,0,0,0.06)",
+                    background: "var(--c-story-css-box-bg, rgba(255, 251, 246, 0.88))",
+                    color: "var(--c-story-text, #4b4335)",
+                    fontSize: "calc(13px*var(--app-text-scale,1))", lineHeight: 1.6, fontFamily: "inherit",
+                  }}
+                />
+                <button
+                  className="story-tool-btn"
+                  style={{ width: "auto", padding: "0 16px", flexShrink: 0 }}
+                  onClick={handleSaveStory}
+                  disabled={!saveNameDraft.trim()}
+                >
+                  保存
+                </button>
+              </div>
+              <div style={{ fontSize: "calc(11px*var(--app-text-scale,1))", marginTop: 6, color: "var(--c-story-sub, rgba(95, 82, 61, 0.72))" }}>
+                每份存档独立保存当时的完整剧情与配置，互不影响。
+              </div>
+
+              {storySaves.length === 0 ? (
+                <div style={{ fontSize: "calc(11px*var(--app-text-scale,1))", marginTop: 10, padding: "10px 12px", background: "var(--c-story-panel, rgba(255,255,255,0.5))", boxShadow: "var(--story-paper-shadow-soft)", color: "var(--c-story-sub, rgba(95, 82, 61, 0.72))" }}>
+                  还没有存档。命名后点「保存」，当前进度会存成独立的一份。
+                </div>
+              ) : (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {storySaves.map((save) => (
+                    <div key={save.id} className="story-save-item">
+                      <div className="story-save-info">
+                        <div className="story-save-name">{save.name}</div>
+                        <div className="story-save-meta">{formatStoryTime(save.createdAt)} · {save.messageCount} 条</div>
+                      </div>
+                      <div className="story-save-actions">
+                        <button className="story-save-action" onClick={() => handleLoadStory(save.id)}>读取</button>
+                        <button className="story-save-action story-save-action-danger" onClick={() => handleDeleteSave(save.id)}>删除</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div className="story-drawer-section">

@@ -41,15 +41,40 @@ export type StoryProjectionEntry = {
   content: string;
 };
 
+/** 存档时一并快照的会话配置，读档时整体恢复，保证存档独立完整 */
+export type StorySaveSnapshot = {
+  foldTags?: string;
+  contextExcludedTags?: string;
+  customCSS?: string;
+  uiPrefs?: StoryUiPrefs;
+};
+
+/** 一份剧情存档：某时刻的完整消息快照 + 会话配置快照 */
+export type StorySave = {
+  id: string;
+  sessionId: string;
+  name: string;
+  createdAt: string;
+  messageCount: number;
+  messages: StoryMessage[];
+  sessionSnapshot?: StorySaveSnapshot;
+};
+
 class StoryDatabase extends Dexie {
   sessions!: Dexie.Table<StorySession, string>;
   messages!: Dexie.Table<StoryMessage, string>;
+  saves!: Dexie.Table<StorySave, string>;
 
   constructor() {
     super("AiPhoneStoryDB");
     this.version(1).stores({
       sessions: "id, characterId, updatedAt",
       messages: "id, sessionId, createdAt",
+    });
+    this.version(2).stores({
+      sessions: "id, characterId, updatedAt",
+      messages: "id, sessionId, createdAt",
+      saves: "id, sessionId, createdAt",
     });
   }
 }
@@ -59,6 +84,7 @@ const storyDb = new StoryDatabase();
 let _hydrated = false;
 let _sessionsCache: StorySession[] = [];
 let _messagesCache: StoryMessage[] = [];
+let _savesCache: StorySave[] = [];
 
 function generateId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -128,11 +154,13 @@ function persistStorySessionsSnapshot(sessions: StorySession[]): void {
 
 export async function hydrateStoryStorage(): Promise<void> {
   if (_hydrated || typeof window === "undefined") return;
-  const [sessions, messages] = await Promise.all([
+  const [sessions, messages, saves] = await Promise.all([
     storyDb.sessions.toArray().catch(() => []),
     storyDb.messages.toArray().catch(() => []),
+    storyDb.saves.toArray().catch(() => []),
   ]);
   _messagesCache = messages;
+  _savesCache = saves;
   const normalized = normalizeStorySessions(sessions);
   _sessionsCache = normalized.items;
   if (normalized.changed) persistStorySessionsSnapshot(normalized.items);
@@ -285,4 +313,46 @@ export function loadStoryProjectionEntries(
   }
 
   return projections;
+}
+
+// ── 剧情存档（每份存档是独立完整快照，互不影响） ──
+
+export function listStorySaves(sessionId: string): StorySave[] {
+  return _savesCache
+    .filter((save) => save.sessionId === sessionId)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+}
+
+export function getStorySave(saveId: string): StorySave | undefined {
+  return _savesCache.find((save) => save.id === saveId);
+}
+
+export function createStorySave(
+  sessionId: string,
+  name: string,
+  messages: StoryMessage[],
+  sessionSnapshot?: StorySaveSnapshot
+): StorySave {
+  const save: StorySave = {
+    id: generateId("story_save"),
+    sessionId,
+    name: name.trim() || "未命名存档",
+    createdAt: new Date().toISOString(),
+    messageCount: messages.length,
+    messages: messages.map((message) => ({ ...message })),
+    sessionSnapshot: sessionSnapshot
+      ? {
+          ...sessionSnapshot,
+          uiPrefs: sessionSnapshot.uiPrefs ? { ...sessionSnapshot.uiPrefs } : undefined,
+        }
+      : undefined,
+  };
+  _savesCache.unshift(save);
+  storyDb.saves.put(save).catch(() => undefined);
+  return save;
+}
+
+export function deleteStorySave(saveId: string): void {
+  _savesCache = _savesCache.filter((save) => save.id !== saveId);
+  storyDb.saves.delete(saveId).catch(() => undefined);
 }

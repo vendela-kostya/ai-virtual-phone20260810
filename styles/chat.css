@@ -1056,9 +1056,15 @@
   background: transparent;
   border: none;
   color: #fff;
-  padding: 0 12px;
-  font-size: calc(12.6px*var(--app-text-scale,1));
+  padding: 0 18px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(16px*var(--app-text-scale,1));
+  line-height: 1.2;
   cursor: pointer;
+  touch-action: manipulation;
 }
 .ctx-menu-btn-danger {
   color: var(--c-danger);

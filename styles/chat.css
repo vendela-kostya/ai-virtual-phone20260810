@@ -1280,6 +1280,10 @@
   display: block;
   flex-shrink: 0;
 }
+.chat-msg-read-unread {
+  color: var(--c-icon);
+  font-weight: 400;
+}
 .chat-msg-wrapper[data-multi-select][data-selected] {
   background: color-mix(in srgb, var(--c-icon-active) 10%, transparent);
 }

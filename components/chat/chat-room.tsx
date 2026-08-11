@@ -36,10 +36,12 @@ import { TransferTargetModal } from "./transfer-target-modal";
 import { GiftPickerModal } from "./gift-picker-modal";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { deleteWeixinCloudMessagesFromCloud } from "@/lib/weixin-cloud-sync";
-import { loadBindingConfig, loadRegexes, resolveBinding, resolveUserIdentity } from "@/lib/settings-storage";
+import { loadBindingConfig, loadRegexes, resolveBinding, resolveUserIdentity, resolveAuxiliaryApiConfig } from "@/lib/settings-storage";
 import { generateGroupChatCompletion, generateGroupOfflineChatCompletion, parseGroupChatResponse, buildEditableGroupRoundText } from "@/lib/group-chat-engine";
 import { appendChatOfflineTurn, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, loadChatOfflineTurns, parseOfflineResponse, saveChatOfflineTurns, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
 import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
+import { saveMemoryEntry, loadMemoryConfig } from "@/lib/memory-storage";
+import { generateEmbedding, resolveEmbeddingModel } from "@/lib/memory-embedding";
 import { scheduleFollowUp, cancelFollowUp } from "@/lib/follow-up-service";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
@@ -602,6 +604,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     showStickerPanel: boolean;
     showPlusMenu: boolean;
     customPlusActions: RegisteredCustomAppChatPlusAction[];
+    onOpenMemoryModal: () => void;
     onClearQuote: () => void;
     onToggleOfflineMode: () => void;
     onClosePanels: () => void;
@@ -633,6 +636,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     showStickerPanel,
     showPlusMenu,
     customPlusActions,
+    onOpenMemoryModal,
     onClearQuote,
     onToggleOfflineMode,
     onClosePanels,
@@ -712,6 +716,9 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
         { icon: <Gift size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "礼物", onClick: () => onOpenRichModal("gift") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>, label: "位置", onClick: () => onOpenRichModal("location") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>, label: "语音条", onClick: () => onOpenRichModal("voice_msg") },
+        ...(isGroup ? [] : [
+            { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8" /><path d="M1 3h22v5H1z" /><path d="M10 12h4" /></svg>, label: "记忆", onClick: onOpenMemoryModal },
+        ]),
         ...customPlusActions.map(action => ({
             icon: action.appIconDataUrl
                 ? <span className="chat-plus-custom-app-icon" style={{ backgroundImage: `url(${action.appIconDataUrl})` }} aria-hidden="true" />
@@ -1052,6 +1059,10 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
     const [cloudDeletePending, setCloudDeletePending] = useState<{ count: number } | null>(null);
     const [showPlusMenu, setShowPlusMenu] = useState(false);
     const [customPlusActions, setCustomPlusActions] = useState<RegisteredCustomAppChatPlusAction[]>(() => loadCustomAppChatPlusActions());
+    // 加号栏「记忆」：手动添加线下记忆（按角色独立存储）
+    const [memoryModalOpen, setMemoryModalOpen] = useState(false);
+    const [memoryDraft, setMemoryDraft] = useState("");
+    const [memorySaving, setMemorySaving] = useState(false);
     const [activeCustomChatPlus, setActiveCustomChatPlus] = useState<ActiveCustomChatPlus | null>(null);
     const [showSettings, setShowSettings] = useState(false);
     const [showVoiceCall, setShowVoiceCall] = useState(false);
@@ -3324,6 +3335,84 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
         });
     }, [character?.name, groupCharacters, session.contactId, session.groupName, session.id, session.isGroup, session.participantIds]);
 
+    // ── 加号栏「记忆」：手动添加线下记忆（按角色独立存储） ──
+    const openMemoryModal = () => {
+        setShowPlusMenu(false);
+        setShowEmojiPanel(false);
+        setShowStickerPanel(false);
+        setMemoryDraft("");
+        setMemoryModalOpen(true);
+    };
+
+    const handleSaveManualMemory = async () => {
+        if (!character || memorySaving) return;
+        const content = memoryDraft.trim();
+        if (!content) {
+            showChatToast("记忆内容不能为空");
+            return;
+        }
+        if (content.length > 3000) {
+            showChatToast("记忆内容过长，请控制在 3000 字以内");
+            return;
+        }
+        setMemorySaving(true);
+        try {
+            const now = new Date().toISOString();
+            const config = loadMemoryConfig();
+            let embedding: number[] | undefined;
+            if (config.vectorRecallEnabled) {
+                const embeddingApiConfig = resolveAuxiliaryApiConfig("embeddingApiConfigId");
+                if (embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig)) {
+                    try {
+                        embedding = await generateEmbedding(content, embeddingApiConfig) ?? undefined;
+                    } catch {
+                        embedding = undefined;
+                    }
+                }
+            }
+            await saveMemoryEntry({
+                id: `mem_lt_manual_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                characterId: character.id,
+                sourceApp: "chat",
+                type: "long_term",
+                content,
+                embedding,
+                importance: 0.8,
+                createdAt: now,
+                updatedAt: now,
+                metadata: { origin: "user_manual", addedFrom: "chat_plus" },
+            });
+            setMemoryDraft("");
+            setMemoryModalOpen(false);
+            showChatToast(`已为「${character.name}」添加长期记忆`);
+        } catch (error) {
+            console.error("[ChatRoom] Save manual memory failed:", error);
+            showChatToast("记忆保存失败: " + String(error));
+        } finally {
+            setMemorySaving(false);
+        }
+    };
+
+    // 点击 AI 回复时，把该回复之前的所有用户消息标记为已读（双勾）
+    const markMessagesReadThrough = useCallback((msg: RenderChatMessage) => {
+        const targetId = msg.displaySourceId || msg.id;
+        if (!targetId || targetId.startsWith("vc-") || isTransientMessage(targetId)) return;
+        const stored = loadChatMessages(session.id);
+        const targetIndex = stored.findIndex(m => m.id === targetId);
+        if (targetIndex < 0) return;
+        const toUpdate: ChatMessage[] = [];
+        for (let i = 0; i <= targetIndex; i += 1) {
+            const m = stored[i];
+            if (m.role === "user" && m.status !== "read") {
+                toUpdate.push({ ...m, status: "read" });
+            }
+        }
+        if (toUpdate.length === 0) return;
+        for (const m of toUpdate) updateChatMessage(m.id, { status: "read" });
+        const readIds = new Set(toUpdate.map(m => m.id));
+        setMessages(prev => prev.map(m => (readIds.has(m.id) ? { ...m, status: "read" } : m)));
+    }, [session.id]);
+
     const sendShoppingGiftMessage = (gift: ShoppingGiftCandidate, recipient?: Character): boolean => {
         if (session.isGroup && !recipient) {
             showChatToast("请选择收礼对象");
@@ -5447,6 +5536,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                                             }}
                                                             onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(gMsg.id, { x: e.clientX, y: e.clientY }); }}
                                                             className={`chat-bubble-role-${gMsg.role} py-2 px-3 rounded-md break-words relative cursor-pointer`}
+                                                            onClick={(e) => {
+                                                                if (e.defaultPrevented) return;
+                                                                if (longPressTriggeredRef.current) return;
+                                                                if (gMsg.role !== "user") markMessagesReadThrough(gMsg);
+                                                            }}
                                                             {...(activeMessageId === gMsg.id ? { "data-active": "" } : {})}
                                                         >
                                                             <BilingualTextBlock
@@ -5692,6 +5786,11 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                             style={isStandaloneHtmlPreview ? STANDALONE_CARD_BUBBLE_STYLE : undefined}
                                             data-ui={msg.role === "user" ? "bubble-user" : "bubble-bot"}
                                             data-msg-id={msg.id}
+                                            onClick={(e) => {
+                                                if (e.defaultPrevented) return;
+                                                if (longPressTriggeredRef.current) return;
+                                                if (msg.role !== "user") markMessagesReadThrough(msg);
+                                            }}
                                             {...(activeMessageId === msg.id ? { "data-active": "" } : {})}
                                             >
                                             {/* Message Actions Popup */}
@@ -5722,12 +5821,18 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                         <div className={`chat-msg-meta ${msg.role === "user" ? "chat-msg-meta-user" : "chat-msg-meta-assistant"}`}>
                                             <span className="chat-msg-meta-time">{formatChatUiTime(msg.createdAt)}</span>
                                             {msg.role === "user" && (
-                                                <span className="chat-msg-read" title="已读" aria-label="已读">
-                                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                                        <path d="M2 12l5 5L20 6" />
-                                                        <path d="M11 16l2 2 8-9" opacity="0.5" />
-                                                    </svg>
-                                                    已读
+                                                <span className={`chat-msg-read${msg.status === "read" ? "" : " chat-msg-read-unread"}`} title={msg.status === "read" ? "已读" : "未读"} aria-label={msg.status === "read" ? "已读" : "未读"}>
+                                                    {msg.status === "read" ? (
+                                                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                                            <path d="M2 12l5 5L20 6" />
+                                                            <path d="M11 16l2 2 8-9" opacity="0.5" />
+                                                        </svg>
+                                                    ) : (
+                                                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                                            <path d="M2 12l5 5L20 6" />
+                                                        </svg>
+                                                    )}
+                                                    {msg.status === "read" ? "已读" : "未读"}
                                                 </span>
                                             )}
                                         </div>
@@ -5870,6 +5975,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                 showStickerPanel={showStickerPanel}
                 showPlusMenu={showPlusMenu}
                 customPlusActions={customPlusActions}
+                onOpenMemoryModal={openMemoryModal}
                 onClearQuote={() => setQuotingMessage(null)}
                 onToggleOfflineMode={toggleOfflineMode}
                 onClosePanels={() => { setShowEmojiPanel(false); setShowStickerPanel(false); setShowPlusMenu(false); }}
@@ -6089,6 +6195,49 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                     }}
                     onClose={() => setRichModal(null)}
                 />
+            )}
+
+            {/* 加号栏「记忆」弹窗：手动添加线下记忆（按角色独立存储） */}
+            {memoryModalOpen && (
+                <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => { if (!memorySaving) setMemoryModalOpen(false); }}>
+                    <div className="modal-sheet" data-ui="modal-sheet" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal-header" data-ui="modal-header">
+                            <button className="modal-header-btn modal-header-btn-muted" onClick={() => setMemoryModalOpen(false)} disabled={memorySaving}>
+                                <X size={18} />
+                            </button>
+                            <h3 className="modal-title">添加记忆 · {character?.name || "对方"}</h3>
+                            <button
+                                className="modal-header-btn modal-header-btn-action"
+                                onClick={handleSaveManualMemory}
+                                disabled={memorySaving || !memoryDraft.trim() || memoryDraft.trim().length > 3000}
+                            >
+                                <Check size={18} />
+                            </button>
+                        </div>
+                        <div className="modal-body" data-ui="modal-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                            <textarea
+                                className="ui-textarea"
+                                value={memoryDraft}
+                                placeholder={"记录一次重要事件、承诺、偏好或关系变化，保存后作为该角色的长期记忆，后续对话与记忆总结会参考。\n记忆按角色独立存储，互不影响。"}
+                                disabled={memorySaving}
+                                autoFocus
+                                onChange={(e) => setMemoryDraft(e.target.value)}
+                                style={{ minHeight: 140, resize: "vertical", lineHeight: 1.6 }}
+                            />
+                            <div className="flex items-center justify-between" style={{ fontSize: 11, color: memoryDraft.trim().length > 3000 ? "#c2413a" : "var(--c-icon)", opacity: 0.8 }}>
+                                <span>LONG TERM</span>
+                                <span>{memoryDraft.trim().length}/3000</span>
+                            </div>
+                            <button
+                                className="ui-btn ui-btn-primary w-full"
+                                onClick={handleSaveManualMemory}
+                                disabled={memorySaving || !memoryDraft.trim() || memoryDraft.trim().length > 3000}
+                            >
+                                {memorySaving ? "保存中..." : "保存记忆"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
 
             {/* 思维链底部弹窗（Claude app 风格） */}

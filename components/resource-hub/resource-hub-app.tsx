@@ -13,6 +13,8 @@ import {
     downloadResourceHubFile,
     fetchShareIndex,
     importResourceHubFile,
+    fetchPresetEntry,
+    applyPresetEntry,
     loadResourceHubSource,
     purgeShareIndexCache,
     resolveResourceHubAssetUrl,
@@ -47,6 +49,9 @@ import {
 import { mergeMyUploads } from "@/lib/resource-hub-upload";
 import { DefaultPixelAvatar } from "@/components/resource-hub/pixel-avatar";
 import { DestPixelIcon, FileTypePixelIcon, fileExtension } from "@/components/resource-hub/pixel-icons";
+import { loadPresets } from "@/lib/settings-storage";
+import { displayOrderPrompts } from "@/lib/preset-entry-import";
+import type { Prompt, PresetConfig } from "@/lib/settings-types";
 // 标题栏图标用 lucide 矢量图：⚙/⟳ 这些字符在 iOS 上会被当彩色 emoji 画、
 // 或者字形本身偏小，各设备长相不一；矢量图标则处处一致且小尺寸清晰。
 import { RotateCw, Settings, X } from "lucide-react";
@@ -88,8 +93,12 @@ function formatEntryDate(iso: string | null): string {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** 开屏版权提示的「永不显示」记忆键（值为 "1" 即不再弹）。 */
-const NOTICE_DISMISSED_KEY = "ai_phone_resource_hub_notice_v1";
+/**
+ * 开屏须知的「永不显示」记忆键（值为 "1" 即不再弹）。
+ * 须知内容有实质改动时要升版本号：旧键的「永不显示」不该压住新内容，
+ * 否则老用户永远看不到新增的隐私告知。
+ */
+const NOTICE_DISMISSED_KEY = "ai_phone_resource_hub_notice_v2";
 registerKvMigration(NOTICE_DISMISSED_KEY);
 
 export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onNotice?: (msg: string) => void }) {
@@ -154,6 +163,17 @@ export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onN
     const [confirmUpload, setConfirmUpload] = useState(false);
     // 开屏版权提示（勾了「永不显示」就不再弹）
     const [showNotice, setShowNotice] = useState(false);
+    // 安装插件前的风险告知：待安装的插件文件路径
+    const [confirmPlugin, setConfirmPlugin] = useState<string | null>(null);
+    // 应用主题包前的覆盖确认：待导入的主题包文件路径
+    const [confirmTheme, setConfirmTheme] = useState<string | null>(null);
+    // 「预设条目」四步流程：取到的条目 → 选新增/覆盖 → 选预设 → 选位置
+    const [entryImport, setEntryImport] = useState<{
+        prompt: Prompt;
+        mode: "insert" | "replace" | null;
+        preset: PresetConfig | null;
+    } | null>(null);
+    const [entryBusy, setEntryBusy] = useState(false);
     const [uploadCfg, setUploadCfg] = useState<ResourceHubUploadConfig>(() => loadUploadConfig());
     // 所见即所得编辑器：贴纸选择器（标题/正文两处）、颜色面板
     const [stickerPickerFor, setStickerPickerFor] = useState<"title" | "desc" | null>(null);
@@ -290,8 +310,11 @@ export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onN
     const chatContacts = useMemo(() => {
         if (pickCharacterFor === null) return [];
         const characters = loadCharacters();
+        // ChatSession.contactId 存的是「角色 id」（全仓 createOrGetSession 都传角色 id，
+        // chat-storage 也用它反查角色名）。这里必须给 characterId，给 contact.id 会建出
+        // 一个谁都匹配不上的游离会话，CSS 写进去等于扔了。
         return loadChatContacts().map(contact => ({
-            contactId: contact.id,
+            contactId: contact.characterId,
             name: contact.nickname || characters.find(c => c.id === contact.characterId)?.name || "未知角色",
         }));
     }, [pickCharacterFor]);
@@ -339,6 +362,21 @@ export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onN
         }
     }, [onNotice, source]);
 
+    /** 第三步点下去：落盘并收尾。 */
+    const runEntryImport = useCallback(async (anchorIdentifier: string | null) => {
+        if (!entryImport?.mode || !entryImport.preset) return;
+        setEntryBusy(true);
+        try {
+            const message = await applyPresetEntry(entryImport.prompt, entryImport.preset.id, entryImport.mode, anchorIdentifier);
+            onNotice?.(message);
+            setEntryImport(null);
+        } catch (err) {
+            onNotice?.(`导入失败：${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+            setEntryBusy(false);
+        }
+    }, [entryImport, onNotice]);
+
     const handlePickDestination = useCallback((destination: ImportDestination) => {
         if (!importFile) return;
         const typeError = checkImportFileForDestination(destination, importFile);
@@ -349,6 +387,31 @@ export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onN
         if (destination === "chat_session_css") {
             setPickCharacterFor(importFile);
             setImportFile(null);
+            return;
+        }
+        // 插件与本应用同权限，装上即执行；集市来源必然是陌生人写的代码，先问一句
+        if (destination === "plugin") {
+            setConfirmPlugin(importFile);
+            setImportFile(null);
+            return;
+        }
+        // 主题包是整体覆盖当前外观（主题色/壁纸/图标/组件/桌面布局），不是叠加
+        if (destination === "theme") {
+            setConfirmTheme(importFile);
+            setImportFile(null);
+            return;
+        }
+        // 预设条目：先把条目取下来（顺便校验是不是单条），再走选预设/选位置
+        if (destination === "preset_entry") {
+            const target = importFile;
+            setImportingTo(destination);
+            void fetchPresetEntry(source, target)
+                .then(prompt => {
+                    setEntryImport({ prompt, mode: null, preset: null });
+                    setImportFile(null);
+                })
+                .catch(err => onNotice?.(`导入失败：${err instanceof Error ? err.message : String(err)}`))
+                .finally(() => setImportingTo(null));
             return;
         }
         void runImport(importFile, destination);
@@ -1171,16 +1234,136 @@ export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onN
                 </div>
             )}
 
+            {/* 预设条目：新增 or 覆盖 → 选预设 → 选位置 */}
+            {entryImport && (
+                <div className="rh-dialog-overlay" onClick={entryBusy ? undefined : () => setEntryImport(null)}>
+                    <div className="rh-dialog" onClick={e => e.stopPropagation()}>
+                        <div className="rh-titlebar">
+                            <span className="rh-titlebar-text">
+                                {!entryImport.mode ? "导入预设条目"
+                                    : !entryImport.preset ? "导入到哪个预设？"
+                                        : entryImport.mode === "insert" ? "插到哪一条后面？" : "覆盖哪一条？"}
+                            </span>
+                            <span className="rh-titlebar-controls">
+                                <button className="rh-tb-btn" disabled={entryBusy} onClick={() => setEntryImport(null)}>✕</button>
+                            </span>
+                        </div>
+                        <div className="rh-import-filename">条目：{entryImport.prompt.name || entryImport.prompt.identifier}</div>
+
+                        {/* 第一步：新增还是覆盖 */}
+                        {!entryImport.mode && (
+                            <div className="rh-dialog-body rh-dest-list">
+                                <button className="rh-dest" onClick={() => setEntryImport(v => v && { ...v, mode: "insert" })}>
+                                    <span className="rh-dest-label">新增 —— 插入到某一条之后</span>
+                                </button>
+                                <button className="rh-dest" onClick={() => setEntryImport(v => v && { ...v, mode: "replace" })}>
+                                    <span className="rh-dest-label">覆盖 —— 替换掉某一条</span>
+                                </button>
+                            </div>
+                        )}
+
+                        {/* 第二步：选预设 */}
+                        {entryImport.mode && !entryImport.preset && (
+                            <div className="rh-dialog-body rh-dest-list">
+                                {loadPresets().length > 0 ? loadPresets().map(preset => (
+                                    <button key={preset.id} className="rh-dest"
+                                        onClick={() => setEntryImport(v => v && { ...v, preset })}>
+                                        <span className="rh-dest-label">{preset.name}</span>
+                                        <span className="rh-dest-hint">{preset.prompts.length} 条</span>
+                                    </button>
+                                )) : <div className="rh-center-hint">还没有任何预设，先去设置里建一个吧</div>}
+                            </div>
+                        )}
+
+                        {/* 第三步：选位置。用显示顺序，与预设管理页看到的一致 */}
+                        {entryImport.mode && entryImport.preset && (
+                            <div className="rh-dialog-body rh-dest-list">
+                                {entryImport.mode === "insert" && (
+                                    <button className="rh-dest" disabled={entryBusy}
+                                        onClick={() => void runEntryImport(null)}>
+                                        <span className="rh-dest-label">▲ 放到最前面</span>
+                                    </button>
+                                )}
+                                {displayOrderPrompts(entryImport.preset).map(p => (
+                                    <button key={p.identifier} className="rh-dest" disabled={entryBusy}
+                                        onClick={() => void runEntryImport(p.identifier)}>
+                                        <span className="rh-dest-label">
+                                            {entryBusy && <><PixelHourglass size={13} /> </>}
+                                            {p.name || p.identifier}
+                                        </span>
+                                        <span className="rh-dest-hint">{p.marker ? "占位条目" : p.role}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* 主题包覆盖确认：主题包是整体替换当前外观，不是叠加 */}
+            {confirmTheme && (
+                <div className="rh-dialog-overlay" onClick={importingTo ? undefined : () => setConfirmTheme(null)}>
+                    <div className="rh-dialog" onClick={e => e.stopPropagation()}>
+                        <div className="rh-titlebar"><span className="rh-titlebar-text">应用主题包</span></div>
+                        <div className="rh-dialog-body">
+                            <span className="rh-dialog-icon">🎨</span>
+                            <span>
+                                主题包会<b>整体覆盖你当前的外观</b>——主题色、壁纸、图标样式、桌面组件和图标位置都会换成这一套。
+                                想留住现在的样子，可以先去外观页导出一份自己的主题包。已安装的自定义 App 图标会自动排回桌面空位，不会丢。
+                            </span>
+                        </div>
+                        <div className="rh-dialog-footer">
+                            <button className="rh-btn" disabled={!!importingTo} onClick={() => setConfirmTheme(null)}>取消</button>
+                            <button className="rh-btn rh-btn-primary" disabled={!!importingTo} onClick={() => {
+                                const target = confirmTheme;
+                                setConfirmTheme(null);
+                                void runImport(target, "theme");
+                            }}>确认应用</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 插件安装告知：插件与本应用同权限，装上即执行，必须先问一句 */}
+            {confirmPlugin && (
+                <div className="rh-dialog-overlay" onClick={importingTo ? undefined : () => setConfirmPlugin(null)}>
+                    <div className="rh-dialog" onClick={e => e.stopPropagation()}>
+                        <div className="rh-titlebar"><span className="rh-titlebar-text">安装插件</span></div>
+                        <div className="rh-dialog-body">
+                            <span className="rh-dialog-icon">⚠️</span>
+                            <span>
+                                插件将与应用本身拥有<b>相同的能力</b>（包括访问你的 API 配置与全部聊天数据），
+                                且安装后立即启用。这是其他用户上传的代码，请只安装你信任的来源。确认安装吗？
+                            </span>
+                        </div>
+                        <div className="rh-dialog-footer">
+                            <button className="rh-btn" disabled={!!importingTo} onClick={() => setConfirmPlugin(null)}>取消</button>
+                            <button className="rh-btn rh-btn-primary" disabled={!!importingTo} onClick={() => {
+                                const target = confirmPlugin;
+                                setConfirmPlugin(null);
+                                void runImport(target, "plugin");
+                            }}>确认安装</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* 开屏版权提示：进 app 先说清楚集市作品只能本机用，「永不显示」写进 kv 后不再弹 */}
             {showNotice && (
                 <div className="rh-dialog-overlay">
                     <div className="rh-dialog" onClick={e => e.stopPropagation()}>
-                        <div className="rh-titlebar"><span className="rh-titlebar-text">创作者权益提示</span></div>
-                        <div className="rh-dialog-body">
-                            <span className="rh-dialog-icon">📢</span>
-                            <span>
-                                为了保护创作者权益，从资源市场导入的作品，仅限于本地运行，<b>不能发布市场</b>。
-                            </span>
+                        <div className="rh-titlebar"><span className="rh-titlebar-text">资源市场 APP 须知</span></div>
+                        <div className="rh-dialog-body rh-notice-body">
+                            <p>
+                                <span className="rh-notice-no">1.</span>
+                                上传内容将会发布于公开仓库，你设置的头像、昵称、正文内容、资源文件<b>所有人可见</b>，
+                                请确保你知晓以上内容，<b>保护个人隐私</b>，并发布<b>网络允许的安全内容</b>。
+                            </p>
+                            <p>
+                                <span className="rh-notice-no">2.</span>
+                                为了保护创作者权益，从资源市场导入的他人作品，仅限于本地运行，
+                                <b>不能将他人的作品发布市场</b>。
+                            </p>
                         </div>
                         <div className="rh-dialog-footer">
                             <button className="rh-btn" onClick={() => {
@@ -1822,6 +2005,9 @@ export function ResourceHubApp({ onClose, onNotice }: { onClose: () => void; onN
                     gap: 10px;
                 }
                 .rh-dialog-icon { font-size: 30px; }
+                .rh-notice-body { flex-direction: column; align-items: stretch; gap: 10px; line-height: 1.6; }
+                .rh-notice-body p { margin: 0; }
+                .rh-notice-no { font-weight: 700; margin-right: 2px; }
                 .rh-dialog-footer {
                     display: flex;
                     justify-content: center;

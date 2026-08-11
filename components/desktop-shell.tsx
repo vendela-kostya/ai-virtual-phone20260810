@@ -87,6 +87,7 @@ import {
   readThemeProfile,
   writeThemeProfile
 } from "@/lib/theme-storage";
+import { THEME_PACKAGE_INSTALLED_EVENT } from "@/lib/theme-package";
 import {
   DEFAULT_THEME_PROFILE,
   DEFAULT_FONT_FAMILY,
@@ -1407,6 +1408,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
 
   // 其他模块（如工坊 agent 装应用）请求把已安装应用的图标摆上桌面
   const handleInstallCustomAppToDesktopRef = useRef<((app: InstalledCustomApp) => void) | null>(null);
+  const handleThemeDesktopChangeRef = useRef<((next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[] }) => void) | null>(null);
+  const applyThemeRef = useRef<((next: ThemeProfile) => Promise<void>) | null>(null);
   useEffect(() => {
     const placeHandler = (e: Event) => {
       const appId = (e as CustomEvent).detail?.appId;
@@ -1416,6 +1419,21 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
     window.addEventListener(CUSTOM_APP_PLACE_DESKTOP_EVENT, placeHandler);
     return () => window.removeEventListener(CUSTOM_APP_PLACE_DESKTOP_EVENT, placeHandler);
+  }, []);
+
+  // 资源集市在 lib 里装完主题包后请桌面刷新。走的落地路径与外观页导入完全一致
+  // （handleThemeDesktopChange + applyTheme），只是入口从 React 回调换成了事件。
+  useEffect(() => {
+    const onThemePackage = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { themeProfile?: ThemeProfile; iconLayout?: DesktopLayout; widgets?: WidgetInstance[]; dock?: DesktopIconId[] }
+        | undefined;
+      if (!detail?.themeProfile || !detail.iconLayout || !detail.widgets) return;
+      handleThemeDesktopChangeRef.current?.({ widgets: detail.widgets, iconLayout: detail.iconLayout, dock: detail.dock });
+      void applyThemeRef.current?.(detail.themeProfile);
+    };
+    window.addEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
+    return () => window.removeEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
   }, []);
 
   useEffect(() => {
@@ -2884,6 +2902,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     saveWidgets(normalizedWidgets);
     kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(normalizedLayout));
   }
+
+  handleThemeDesktopChangeRef.current = handleThemeDesktopChange;
+  applyThemeRef.current = applyTheme;
 
   function handleWidgetConfigChange(widgetId: string, config: Record<string, unknown>): void {
     setWidgets((prev) => {

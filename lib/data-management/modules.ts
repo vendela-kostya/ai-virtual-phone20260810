@@ -250,7 +250,7 @@ export const DATA_MODULES: DataModuleDefinition[] = [
           "ai_phone_resource_hub_upload_cfg_v1",
           "ai_phone_resource_hub_source_v1",
           "ai_phone_resource_hub_flowers_sent_v1",
-          "ai_phone_resource_hub_notice_v1",
+          "ai_phone_resource_hub_notice_v2",
         ],
       },
     ],

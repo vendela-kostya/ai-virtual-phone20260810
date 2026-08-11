@@ -230,7 +230,7 @@ export async function generateMultiStoryCompletion(
 
   const multiRule = [
     `## [多人剧情规则]`,
-    `这是一场三人共同参与的剧情：用户（${userName}）、${allNames.join("、")}。`,
+    `这是一场${allNames.length + 1}人共同参与的剧情：用户（${userName}）、${allNames.join("、")}。`,
     `你同时演绎以下全部角色，每个角色都要出场并彼此互动、与用户互动：${allNames.join("、")}。`,
     `角色对白前用「${allNames.map((n) => `${n}：`).join("」「")}」标注说话者；其余为旁白与叙事。`,
     `严格保持每个角色的人设、性格与说话风格始终一致，绝不让角色互相替代或混淆。`,

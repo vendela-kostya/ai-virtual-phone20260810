@@ -408,7 +408,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   function toggleMultiPick(characterId: string) {
     setMultiPickIds((prev) => {
       if (prev.includes(characterId)) return prev.filter((id) => id !== characterId);
-      if (prev.length >= 2) return prev; // 最多两个角色
+      if (prev.length >= 20) return prev; // 最多 20 个角色
       return [...prev, characterId];
     });
   }
@@ -1060,12 +1060,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   >
                     <span className="story-select-mode-icon">👥</span>
                     <span className="story-select-mode-name">多人剧情</span>
-                    <span className="story-select-mode-desc">你与两位角色一起开始剧情</span>
+                    <span className="story-select-mode-desc">你与多位角色一起开始剧情</span>
                   </button>
                 </div>
 
                 <div className="story-select-hint">
-                  {multiMode ? "选择两位角色，与你共同开始剧情" : "选择一位角色，开始你们的剧情"}
+                  {multiMode ? "选择最多 20 位角色，与你共同开始剧情" : "选择一位角色，开始你们的剧情"}
                 </div>
 
                 <div className="story-select-char-list">
@@ -1183,7 +1183,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 );
               })}
               <div style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95, 82, 61, 0.72))", lineHeight: 1.6 }}>
-                {storyDisplayNames} 与「{userIdentity?.name || "我"}」三人共同演绎。
+                {storyDisplayNames} 与「{userIdentity?.name || "我"}」共 {activeCharacterIds.length + 1} 人共同演绎。
               </div>
             </div>
           ) : (

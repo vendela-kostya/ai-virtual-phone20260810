@@ -375,7 +375,7 @@ export function createOrGetStorySession(characterId: string): StorySession {
   return session;
 }
 
-/** 创建或获取多人剧情会话：同一组角色共用一份会话（含用户共三人参与） */
+/** 创建或获取多人剧情会话：同一组角色共用一份会话（用户与所选角色共同参与） */
 export function createOrGetMultiStorySession(characterIds: string[]): StorySession {
   const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)));
   if (uniqueIds.length < 2) {

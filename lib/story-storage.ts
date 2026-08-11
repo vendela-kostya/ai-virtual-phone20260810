@@ -19,6 +19,8 @@ export type StorySession = {
   uiPrefs?: StoryUiPrefs;
   lastMessageId?: string;
   lastMessagePreview?: string;
+  /** 多人剧情：参与角色 id 列表（≥2 时视为多人会话）。characterId 仍存主角色 id。 */
+  characterIds?: string[];
 };
 
 export type StoryMessageRole = "user" | "assistant" | "system";
@@ -113,6 +115,15 @@ function isPreferredStorySession(candidate: StorySession, current: StorySession)
   return candidate.id.localeCompare(current.id) > 0;
 }
 
+function getMultiSessionKey(characterIds: string[]): string {
+  return `multi:${[...new Set(characterIds)].sort().join(",")}`;
+}
+
+/** 判断会话是否为多人剧情（参与角色 ≥2） */
+export function isMultiStorySession(session: StorySession | null | undefined): boolean {
+  return Boolean(session && Array.isArray(session.characterIds) && session.characterIds.length >= 2);
+}
+
 function normalizeStorySessions(sessions: StorySession[]): { items: StorySession[]; changed: boolean } {
   const normalized: StorySession[] = [];
   const indexByCharacter = new Map<string, number>();
@@ -128,9 +139,13 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
     const item = id === session.id && characterId === session.characterId
       ? session
       : { ...session, id, characterId };
-    const existingIndex = indexByCharacter.get(characterId);
+    // 多人会话用角色组合作为去重 key，与单人会话语义隔离，互不顶替
+    const dedupeKey = isMultiStorySession(item)
+      ? getMultiSessionKey(item.characterIds || [])
+      : characterId;
+    const existingIndex = indexByCharacter.get(dedupeKey);
     if (existingIndex === undefined) {
-      indexByCharacter.set(characterId, normalized.length);
+      indexByCharacter.set(dedupeKey, normalized.length);
       normalized.push(item);
       if (item !== session) changed = true;
       continue;
@@ -186,7 +201,7 @@ export function createOrGetStorySession(characterId: string): StorySession {
     _sessionsCache = normalized.items;
     persistStorySessionsSnapshot(normalized.items);
   }
-  const existing = _sessionsCache.find((session) => session.characterId === characterId);
+  const existing = _sessionsCache.find((session) => !isMultiStorySession(session) && session.characterId === characterId);
   if (existing) return existing;
 
   const session: StorySession = {
@@ -198,6 +213,39 @@ export function createOrGetStorySession(characterId: string): StorySession {
   _sessionsCache.unshift(session);
   storyDb.sessions.put(session).catch(() => undefined);
   return session;
+}
+
+/** 创建或获取多人剧情会话：同一组角色共用一份会话（含用户共三人参与） */
+export function createOrGetMultiStorySession(characterIds: string[]): StorySession {
+  const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueIds.length < 2) {
+    // 参数不足时退化为单人会话
+    return createOrGetStorySession(uniqueIds[0] || "");
+  }
+  const normalized = normalizeStorySessions(_sessionsCache);
+  if (normalized.changed) {
+    _sessionsCache = normalized.items;
+    persistStorySessionsSnapshot(normalized.items);
+  }
+  const key = getMultiSessionKey(uniqueIds);
+  const existing = _sessionsCache.find((session) => isMultiStorySession(session) && getMultiSessionKey(session.characterIds || []) === key);
+  if (existing) return existing;
+
+  const session: StorySession = {
+    id: generateId("story_sess"),
+    characterId: uniqueIds[0],
+    characterIds: uniqueIds,
+    updatedAt: new Date().toISOString(),
+    uiPrefs: {},
+  };
+  _sessionsCache.unshift(session);
+  storyDb.sessions.put(session).catch(() => undefined);
+  return session;
+}
+
+/** 列出所有多人剧情会话（含角色组合与最后预览） */
+export function listMultiStorySessions(): StorySession[] {
+  return loadStorySessions().filter(isMultiStorySession);
 }
 
 export function updateStorySession(sessionId: string, updates: Partial<StorySession>): StorySession | null {
@@ -290,7 +338,7 @@ export function loadStoryProjectionEntries(
   characterId: string,
   options?: { afterTimestamp?: string; userName?: string; charName?: string }
 ): StoryProjectionEntry[] {
-  const session = _sessionsCache.find((item) => item.characterId === characterId);
+  const session = _sessionsCache.find((item) => !isMultiStorySession(item) && item.characterId === characterId);
   if (!session) return [];
   const messages = loadStoryMessages(session.id);
   const projections: StoryProjectionEntry[] = [];

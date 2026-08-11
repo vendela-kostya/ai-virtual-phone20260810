@@ -44,14 +44,17 @@ import { incrementEventCounter } from "@/lib/memory-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import {
   generateStoryCompletion,
+  generateMultiStoryCompletion,
   getStoryRenderSignature,
   rebuildStorySessionRenderCache,
 } from "@/lib/story-engine";
 import {
   createOrGetStorySession,
+  createOrGetMultiStorySession,
   hydrateStoryStorage,
   loadStoryMessages,
   loadStorySessions,
+  listMultiStorySessions,
   pushStoryMessage,
   deleteStoryMessage,
   deleteStoryMessagesFrom,
@@ -61,6 +64,7 @@ import {
   createStorySave,
   deleteStorySave,
   getStorySave,
+  isMultiStorySession,
   type StoryMessage,
   type StorySession,
   updateStorySession,
@@ -288,6 +292,10 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [foldTagsDraft, setFoldTagsDraft] = useState("");
   const [contextExcludedTagsDraft, setContextExcludedTagsDraft] = useState("");
   const [saveNameDraft, setSaveNameDraft] = useState("");
+  // 开屏模式选择：select=选择单人/多人；story=进入剧情界面
+  const [mode, setMode] = useState<"select" | "story">("select");
+  const [multiMode, setMultiMode] = useState(false);
+  const [multiPickIds, setMultiPickIds] = useState<string[]>([]);
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
@@ -312,24 +320,35 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
 
   const characters = useMemo(() => loadCharacters(), []);
-  const userIdentity = useMemo(
-    () => resolveUserIdentity(activeCharacterId, "story") ?? resolveUserIdentity(activeCharacterId) ?? resolveUserIdentity(),
-    [activeCharacterId]
-  );
-  const currentCharacter = useMemo(
-    () => characters.find((character) => character.id === activeCharacterId) || null,
-    [characters, activeCharacterId]
-  );
   const sessions = loadStorySessions();
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || null,
     [sessions, activeSessionId]
+  );
+  const isMultiSession = isMultiStorySession(currentSession);
+  // 多人会话：参与角色取自会话本身；单人会话取 activeCharacterId
+  const activeCharacterIds = isMultiSession && currentSession?.characterIds?.length
+    ? currentSession.characterIds
+    : (activeCharacterId ? [activeCharacterId] : []);
+  const mainCharacterId = activeCharacterIds[0] || activeCharacterId;
+  const multiCharacterNames = useMemo(
+    () => activeCharacterIds.map((id) => characters.find((c) => c.id === id)?.name || id).filter(Boolean),
+    [activeCharacterIds, characters]
+  );
+  const currentCharacter = useMemo(
+    () => characters.find((character) => character.id === mainCharacterId) || null,
+    [characters, mainCharacterId]
+  );
+  const userIdentity = useMemo(
+    () => resolveUserIdentity(mainCharacterId, "story") ?? resolveUserIdentity(mainCharacterId) ?? resolveUserIdentity(),
+    [mainCharacterId]
   );
   const uiPrefs = currentSession?.uiPrefs || {};
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
   // 存档开关：默认开启；按角色（会话）独立记忆
   const saveEnabled = uiPrefs.saveEnabled !== false;
   const storySaves = activeSessionId ? listStorySaves(activeSessionId) : [];
+  const storyDisplayNames = multiCharacterNames.length > 0 ? multiCharacterNames.join(" & ") : (currentCharacter?.name || "");
 
   const markGenerating = useCallback((sessionId: string, on: boolean) => {
     setGeneratingSessionIds((prev) => {
@@ -352,22 +371,48 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
   useEffect(() => {
     hydrateStoryStorage().then(() => {
-      const initialChar = loadCharacters()[0]?.id || "";
-      if (initialChar) {
-        const session = createOrGetStorySession(initialChar);
-        setActiveCharacterId(initialChar);
-        setActiveSessionId(session.id);
-        activeSessionIdRef.current = session.id; // 同步更新，堵住生成完成回调的守卫空窗
-        setVisibleMessageCount(STORY_INITIAL_LOAD);
-        setMessages(loadStoryMessages(session.id));
-        setCustomCssDraft(session.customCSS || "");
-        setFoldTagsDraft(session.foldTags ?? "think,thinking");
-        setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking");
-        setStorageVersion((value) => value + 1);
-      }
       setReady(true);
     });
   }, []);
+
+  // 单人入口：从模式选择页进入某角色会话
+  function enterSingleSession(characterId: string) {
+    const session = createOrGetStorySession(characterId);
+    setActiveCharacterId(characterId);
+    setActiveSessionId(session.id);
+    activeSessionIdRef.current = session.id;
+    setVisibleMessageCount(STORY_INITIAL_LOAD);
+    setMessages(loadStoryMessages(session.id));
+    setCustomCssDraft(session.customCSS || "");
+    setFoldTagsDraft(session.foldTags ?? "think,thinking");
+    setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking");
+    setStorageVersion((value) => value + 1);
+    setMode("story");
+    setDrawerOpen(false);
+  }
+
+  // 多人入口：两个（或多个）角色一起开始剧情
+  function enterMultiSession(ids: string[]) {
+    const session = createOrGetMultiStorySession(ids);
+    setActiveSessionId(session.id);
+    activeSessionIdRef.current = session.id;
+    setVisibleMessageCount(STORY_INITIAL_LOAD);
+    setMessages(loadStoryMessages(session.id));
+    setCustomCssDraft(session.customCSS || "");
+    setFoldTagsDraft(session.foldTags ?? "think,thinking");
+    setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking");
+    setStorageVersion((value) => value + 1);
+    setMode("story");
+    setDrawerOpen(false);
+  }
+
+  function toggleMultiPick(characterId: string) {
+    setMultiPickIds((prev) => {
+      if (prev.includes(characterId)) return prev.filter((id) => id !== characterId);
+      if (prev.length >= 2) return prev; // 最多两个角色
+      return [...prev, characterId];
+    });
+  }
 
   useEffect(() => {
     if (!activeCharacterId) return;
@@ -545,7 +590,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     // 抛出去会让整个剧情页白屏，所以失败时跳过缓存刷新，错误留到发送时提示
     let signature: { regexSignature: string; parserVersion: number };
     try {
-      signature = getStoryRenderSignature(activeCharacterId);
+      signature = getStoryRenderSignature(mainCharacterId);
     } catch {
       return;
     }
@@ -667,6 +712,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     if (!activeSessionId || !userText || isGenerating) return;
     const sessionId = activeSessionId;
     const characterId = activeCharacterId;
+    const generationCharacterIds = activeCharacterIds;
 
     const userMessage = pushStoryMessage({
       sessionId,
@@ -683,11 +729,17 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
     try {
       const historyForGeneration = loadStoryMessages(sessionId);
-      const result = await generateStoryCompletion(characterId, historyForGeneration, {
-        sessionFoldTags: currentSession?.foldTags,
-        sessionContextExcludedTags: currentSession?.contextExcludedTags,
-        signal: generationRun.controller.signal,
-      });
+      const result = isMultiSession
+        ? await generateMultiStoryCompletion(generationCharacterIds, historyForGeneration, {
+            sessionFoldTags: currentSession?.foldTags,
+            sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            signal: generationRun.controller.signal,
+          })
+        : await generateStoryCompletion(characterId, historyForGeneration, {
+            sessionFoldTags: currentSession?.foldTags,
+            sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            signal: generationRun.controller.signal,
+          });
       if (!isCurrentGeneration()) return;
       const assistantMessage = pushStoryMessage({
         sessionId,
@@ -834,7 +886,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     let newRawContent = draft.trim();
     // Apply runOnEdit regex rules (placement=2, isEdit=true) to the edited content.
     try {
-      const { regexes } = getStoryRenderSignature(activeCharacterId);
+      const { regexes } = getStoryRenderSignature(mainCharacterId);
       if (regexes.length > 0) {
         const macroEngine = new MacroEngine(currentCharacter?.name ?? "", userIdentity?.name ?? "用户");
         newRawContent = applyEditOutputRegex(newRawContent, regexes, { macroEngine, activeTags: ["story"] });
@@ -871,6 +923,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     if (retryMessage.role !== "assistant" && retryMessage.role !== "user") return;
     const sessionId = activeSessionId;
     const characterId = activeCharacterId;
+    const retryCharacterIds = activeCharacterIds;
     const contextMessages = retryMessage.role === "user"
       ? messages.slice(0, msgIndex + 1)
       : messages.slice(0, msgIndex);
@@ -890,11 +943,17 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const generationRunId = generationRun.runId;
     const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
     try {
-      const result = await generateStoryCompletion(characterId, contextMessages, {
-        sessionFoldTags: currentSession?.foldTags,
-        sessionContextExcludedTags: currentSession?.contextExcludedTags,
-        signal: generationRun.controller.signal,
-      });
+      const result = isMultiSession
+        ? await generateMultiStoryCompletion(retryCharacterIds, contextMessages, {
+            sessionFoldTags: currentSession?.foldTags,
+            sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            signal: generationRun.controller.signal,
+          })
+        : await generateStoryCompletion(characterId, contextMessages, {
+            sessionFoldTags: currentSession?.foldTags,
+            sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            signal: generationRun.controller.signal,
+          });
       if (!isCurrentGeneration()) return;
       const assistantMessage = pushStoryMessage({
         sessionId, role: "assistant",
@@ -954,6 +1013,130 @@ export function StoryApp({ onClose }: StoryAppProps) {
     );
   }
 
+  // ── 开屏：选择单人 / 多人模式，再选角色开始 ──
+  if (mode === "select") {
+    const multiSessions = listMultiStorySessions();
+    return (
+      <div className="story-app-shell" data-story-theme="paper">
+        <div className="story-shell-inner">
+          <div className="story-header">
+            <div className="story-header-safe-area" />
+            <div className="story-header-content">
+              <div className="story-header-left">
+                <button className="story-top-btn" onClick={onClose} aria-label="关闭剧情模式">
+                  <SolidBackIcon size={16} />
+                </button>
+              </div>
+              <div className="story-header-center">Story</div>
+              <div className="story-header-right" />
+            </div>
+          </div>
+
+          <div className="story-stage story-stage-empty story-select-scroll">
+            <div className="story-stage-inner">
+              <div className="story-select-panel">
+                <div className="story-select-title">选择剧情模式</div>
+
+                <div className="story-select-modes">
+                  <button
+                    type="button"
+                    className={`story-select-mode${!multiMode ? " is-active" : ""}`}
+                    onClick={() => setMultiMode(false)}
+                  >
+                    <span className="story-select-mode-icon">📖</span>
+                    <span className="story-select-mode-name">单人剧情</span>
+                    <span className="story-select-mode-desc">你与一位角色共同展开故事</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`story-select-mode${multiMode ? " is-active" : ""}`}
+                    onClick={() => setMultiMode(true)}
+                  >
+                    <span className="story-select-mode-icon">👥</span>
+                    <span className="story-select-mode-name">多人剧情</span>
+                    <span className="story-select-mode-desc">你与两位角色一起开始剧情</span>
+                  </button>
+                </div>
+
+                <div className="story-select-hint">
+                  {multiMode ? "选择两位角色，与你共同开始剧情" : "选择一位角色，开始你们的剧情"}
+                </div>
+
+                <div className="story-select-char-list">
+                  {characters.map((character) => {
+                    const picked = multiMode && multiPickIds.includes(character.id);
+                    return (
+                      <button
+                        key={character.id}
+                        type="button"
+                        className="story-select-char"
+                        data-picked={picked ? "true" : undefined}
+                        onClick={() => {
+                          if (multiMode) {
+                            toggleMultiPick(character.id);
+                          } else {
+                            enterSingleSession(character.id);
+                          }
+                        }}
+                      >
+                        <Avatar src={character.avatar || undefined} name={character.name} size="lg" />
+                        <span className="story-character-name">{character.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {multiMode && (
+                  <div className="story-select-multi-actions">
+                    <div className="story-select-multi-pick">
+                      已选：{multiPickIds.length === 0
+                        ? "尚未选择"
+                        : multiPickIds.map((id) => characters.find((c) => c.id === id)?.name || id).join("、")}
+                    </div>
+                    <button
+                      type="button"
+                      className="story-empty-action"
+                      disabled={multiPickIds.length < 2}
+                      style={multiPickIds.length < 2 ? { opacity: 0.45, cursor: "default" } : undefined}
+                      onClick={() => enterMultiSession(multiPickIds)}
+                    >
+                      开始多人剧情
+                    </button>
+                  </div>
+                )}
+
+                {multiSessions.length > 0 && (
+                  <div className="story-select-continue">
+                    <div className="story-drawer-eyebrow">继续之前的多剧情</div>
+                    {multiSessions.map((session) => {
+                      const names = (session.characterIds || [])
+                        .map((id) => characters.find((c) => c.id === id)?.name || id)
+                        .join(" & ");
+                      return (
+                        <button
+                          key={session.id}
+                          type="button"
+                          className="story-tool-btn"
+                          style={{ marginBottom: 8, textAlign: "left", padding: "10px 14px", lineHeight: 1.5 }}
+                          onClick={() => enterMultiSession(session.characterIds || [])}
+                        >
+                          {names}
+                          <span style={{ display: "block", fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95,82,61,0.72))", marginTop: 2 }}>
+                            {session.lastMessagePreview ? `…${session.lastMessagePreview}` : "尚未开始"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!currentCharacter || !currentSession) return null;
 
   const sessionScope = `.story-session-${currentSession.id}`;
@@ -981,22 +1164,40 @@ export function StoryApp({ onClose }: StoryAppProps) {
       <aside className="story-drawer" style={{ transform: drawerOpen ? "translateX(0)" : "translateX(106%)", transition: "transform 220ms ease" }}>
         <div className="story-drawer-section">
           <div className="story-drawer-eyebrow">剧情角色</div>
-          <div className="story-character-list">
-            {characters.map((character) => (
-              <button
-                key={character.id}
-                className="story-character-chip"
-                data-active={character.id === activeCharacterId ? "true" : undefined}
-                onClick={() => {
-                  setActiveCharacterId(character.id);
-                  setDrawerOpen(false);
-                }}
-              >
-                <Avatar src={character.avatar || undefined} name={character.name} size="lg" />
-                <span className="story-character-name">{character.name}</span>
-              </button>
-            ))}
-          </div>
+          {isMultiSession ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {activeCharacterIds.map((id) => {
+                const c = characters.find((ch) => ch.id === id);
+                if (!c) return null;
+                return (
+                  <div key={c.id} className="story-character-chip" style={{ flexDirection: "row", justifyContent: "flex-start", cursor: "default" }}>
+                    <Avatar src={c.avatar || undefined} name={c.name} size="lg" />
+                    <span className="story-character-name">{c.name}</span>
+                  </div>
+                );
+              })}
+              <div style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95, 82, 61, 0.72))", lineHeight: 1.6 }}>
+                {storyDisplayNames} 与「{userIdentity?.name || "我"}」三人共同演绎。
+              </div>
+            </div>
+          ) : (
+            <div className="story-character-list">
+              {characters.map((character) => (
+                <button
+                  key={character.id}
+                  className="story-character-chip"
+                  data-active={character.id === activeCharacterId ? "true" : undefined}
+                  onClick={() => {
+                    setActiveCharacterId(character.id);
+                    setDrawerOpen(false);
+                  }}
+                >
+                  <Avatar src={character.avatar || undefined} name={character.name} size="lg" />
+                  <span className="story-character-name">{character.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="story-drawer-section">
@@ -1147,7 +1348,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
             className="story-tool-btn"
             onClick={() => {
               try {
-                const rebuilt = rebuildStorySessionRenderCache(activeCharacterId, currentSession.id, { sessionFoldTags: currentSession.foldTags });
+                const rebuilt = rebuildStorySessionRenderCache(mainCharacterId, currentSession.id, { sessionFoldTags: currentSession.foldTags });
                 setMessages(rebuilt);
                 setStorageVersion((value) => value + 1);
                 alert(`缓存重建完成，${rebuilt.length} 条消息已更新`);
@@ -1172,7 +1373,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 <SolidBackIcon size={16} />
               </button>
             </div>
-            <div className="story-header-center">Story</div>
+            <div className="story-header-center">{isMultiSession ? storyDisplayNames : "Story"}</div>
             <div className="story-header-right" style={{ gap: 8 }}>
               <button className="story-top-btn" onClick={() => setCssModalOpen(true)} aria-label="页面样式">
                 <PaintBrushIcon width={16} height={16} />
@@ -1211,9 +1412,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   )}
                 </div>
                 <div className="story-meta-body">
-                  <div className="story-meta-title">本次阅读：《 {currentCharacter.name} 》</div>
+                  <div className="story-meta-title">本次阅读：《 {storyDisplayNames} 》</div>
                   <div className="story-meta-tags">
-                    {userIdentity?.name || "我"} x {currentCharacter.name}
+                    {userIdentity?.name || "我"} x {storyDisplayNames}
                   </div>
                   <div className="story-meta-desc">
                     {/* Character type might not have description, so we use a stylized default text */}
@@ -1249,7 +1450,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   const speakerName = message.role === "user"
                     ? (userIdentity?.name?.trim() || "我")
                     : message.role === "assistant"
-                      ? currentCharacter.name
+                      ? (isMultiSession ? storyDisplayNames : currentCharacter.name)
                       : "系统";
                   const avatarUrl = message.role === "user"
                     ? (userIdentity?.avatarUrl || undefined)
@@ -1347,7 +1548,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
             )}
             {isGenerating ? (
               <StoryGeneratingIndicator
-                characterName={currentCharacter.name}
+                characterName={storyDisplayNames || currentCharacter.name}
                 avatar={currentCharacter.avatar || undefined}
               />
             ) : null}
@@ -1356,7 +1557,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
       </div>
 
       <StoryComposer
-        characterName={currentCharacter.name}
+        characterName={storyDisplayNames || currentCharacter.name}
         isGenerating={isGenerating}
         appendRequest={composerAppendRequest}
         onSend={(text) => { void handleSend(text); }}

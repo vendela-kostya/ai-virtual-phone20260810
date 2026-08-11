@@ -41,7 +41,7 @@ import { StoryHtmlRenderer } from "@/components/ui/story-html-renderer";
 import { loadCharacters } from "@/lib/character-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
 import { incrementEventCounter } from "@/lib/memory-storage";
-import { loadUserIdentities, resolveUserIdentity } from "@/lib/settings-storage";
+import { resolveUserIdentity } from "@/lib/settings-storage";
 import {
   generateStoryCompletion,
   generateMultiStoryCompletion,
@@ -63,7 +63,6 @@ import {
   listStorySaves,
   createStorySave,
   deleteStorySave,
-  deleteStorySession,
   getStorySave,
   isMultiStorySession,
   type StoryMessage,
@@ -297,8 +296,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [mode, setMode] = useState<"select" | "story">("select");
   const [multiMode, setMultiMode] = useState(false);
   const [multiPickIds, setMultiPickIds] = useState<string[]>([]);
-  // 开屏手动选择的用户身份；null 表示跟随角色绑定解析
-  const [pickUserIdentityId, setPickUserIdentityId] = useState<string | null>(null);
+  // 用户身份跟随角色绑定的级联解析（不提供开屏手动选择）
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
@@ -320,10 +318,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const loadMoreRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
   const lastTapRef = useRef<{ msgId: string; time: number } | null>(null);
-  const continueTapRef = useRef<{ timer: number | null; sessionId: string | null }>({ timer: null, sessionId: null });
-
   const characters = useMemo(() => loadCharacters(), []);
-  const identities = useMemo(() => loadUserIdentities(), [storageVersion]);
   const sessions = loadStorySessions();
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || null,
@@ -344,13 +339,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
     [characters, mainCharacterId]
   );
   const userIdentity = useMemo(() => {
-    // 会话级手动指定的身份优先；否则按绑定级联解析（角色→全局→默认）
-    if (currentSession?.userIdentityId) {
-      const found = loadUserIdentities().find((identity) => identity.id === currentSession.userIdentityId);
-      if (found) return found;
-    }
+    // 按绑定级联解析（角色→全局→默认）
     return resolveUserIdentity(mainCharacterId, "story") ?? resolveUserIdentity(mainCharacterId) ?? resolveUserIdentity();
-  }, [currentSession?.userIdentityId, mainCharacterId]);
+  }, [mainCharacterId]);
   const uiPrefs = currentSession?.uiPrefs || {};
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
   // 存档开关：默认开启；按角色（会话）独立记忆
@@ -386,8 +377,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
   // 单人入口：从模式选择页进入某角色会话
   function enterSingleSession(characterId: string) {
     const session = createOrGetStorySession(characterId);
-    // 手动指定了身份时写入会话，之后该会话固定使用这个身份
-    if (pickUserIdentityId) updateStorySession(session.id, { userIdentityId: pickUserIdentityId });
     setActiveCharacterId(characterId);
     setActiveSessionId(session.id);
     activeSessionIdRef.current = session.id;
@@ -404,8 +393,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
   // 多人入口：两个（或多个）角色一起开始剧情
   function enterMultiSession(ids: string[]) {
     const session = createOrGetMultiStorySession(ids);
-    // 手动指定了身份时写入会话，之后该会话固定使用这个身份
-    if (pickUserIdentityId) updateStorySession(session.id, { userIdentityId: pickUserIdentityId });
     setActiveSessionId(session.id);
     activeSessionIdRef.current = session.id;
     setVisibleMessageCount(STORY_INITIAL_LOAD);
@@ -426,28 +413,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
     });
   }
 
-  // 开屏「继续之前的多剧情」：单击进入，双击删除该段剧情（含消息与存档）
+  // 开屏「继续之前的多剧情」：单击直接进入
   function handleContinueSessionTap(session: StorySession) {
-    const pending = continueTapRef.current;
-    if (pending && pending.sessionId === session.id && pending.timer != null) {
-      clearTimeout(pending.timer);
-      continueTapRef.current = { timer: null, sessionId: null };
-      const names = (session.characterIds || [])
-        .map((id) => characters.find((c) => c.id === id)?.name || id)
-        .join(" & ");
-      if (window.confirm(`删除「${names}」这段剧情？\n其中的消息记录与存档将一并删除，此操作不可恢复。`)) {
-        deleteStorySession(session.id);
-        setStorageVersion((v) => v + 1);
-      }
-      return;
-    }
-    continueTapRef.current = {
-      sessionId: session.id,
-      timer: window.setTimeout(() => {
-        continueTapRef.current = { timer: null, sessionId: null };
-        enterMultiSession(session.characterIds || []);
-      }, 320),
-    };
+    enterMultiSession(session.characterIds || []);
   }
 
   useEffect(() => {
@@ -1100,33 +1068,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   {multiMode ? "选择两位角色，与你共同开始剧情" : "选择一位角色，开始你们的剧情"}
                 </div>
 
-                <div className="story-select-identity">
-                  <div className="story-select-identity-head">
-                    <span className="story-drawer-eyebrow" style={{ marginBottom: 0 }}>你的身份</span>
-                    <span className="story-select-identity-sub">选一个身份作为「你」；不选则跟随角色绑定</span>
-                  </div>
-                  {identities.length === 0 ? (
-                    <div className="story-select-identity-empty">暂无身份卡片，可在「设置 → 用户身份」中创建。未选时以「我」的身份进入。</div>
-                  ) : (
-                    <div className="story-select-identity-list">
-                      {identities.map((identity) => {
-                        const active = pickUserIdentityId === identity.id;
-                        return (
-                          <button
-                            key={identity.id}
-                            type="button"
-                            className={`story-select-identity-item${active ? " is-active" : ""}`}
-                            onClick={() => setPickUserIdentityId(active ? null : identity.id)}
-                          >
-                            <Avatar src={identity.avatarUrl || undefined} name={String(identity.name ?? "")} size="md" />
-                            <span className="story-select-identity-name">{identity.name}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
                 <div className="story-select-char-list">
                   {characters.map((character) => {
                     const picked = multiMode && multiPickIds.includes(character.id);
@@ -1189,7 +1130,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
                           <span style={{ display: "block", fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95,82,61,0.72))", marginTop: 2 }}>
                             {session.lastMessagePreview ? `…${session.lastMessagePreview}` : "尚未开始"}
                           </span>
-                          <span className="story-continue-del-hint">双击删除这段剧情</span>
                         </button>
                       );
                     })}

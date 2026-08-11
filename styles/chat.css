@@ -1252,6 +1252,34 @@
   padding-left: 36px;
   cursor: pointer;
 }
+/* ── 每条消息旁的时间与已读标志 ── */
+.chat-msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  font-size: calc(10px*var(--app-text-scale,1));
+  line-height: 1.2;
+  color: var(--c-icon);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  white-space: nowrap;
+}
+.chat-msg-meta-user {
+  justify-content: flex-end;
+}
+.chat-msg-read {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--c-icon-active, #246bfd);
+  font-weight: 500;
+}
+.chat-msg-read svg {
+  display: block;
+  flex-shrink: 0;
+}
 .chat-msg-wrapper[data-multi-select][data-selected] {
   background: color-mix(in srgb, var(--c-icon-active) 10%, transparent);
 }

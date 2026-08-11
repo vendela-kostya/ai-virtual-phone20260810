@@ -5511,13 +5511,6 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
 
                     return (
                         <div key={msg.id} className="flex flex-col gap-4" {...(hiddenEmpty ? { style: { display: "none" } } : {})} {...(isEmptyBubble && renderMsg.reasoningText && !showTime ? { "data-reasoning-only": "" } : {})}>
-                            {showTime && (
-                                <div className="flex justify-center w-full">
-                                    <span className="chat-sys-msg py-[2px] px-2 rounded select-none">
-                                        {formatChatUiTime(msg.createdAt)}
-                                    </span>
-                                </div>
-                            )}
                             {/* 思维链触发条（Claude app 风格）：点击打开底部弹窗 */}
                             {renderMsg.reasoningText && msg.role !== "user" && uiRole(msg) !== "system" && (
                                 <div className="chat-msg-wrapper" data-role={uiRole(msg)} data-reasoning-row="" style={{ marginBottom: -8 }}>
@@ -5725,6 +5718,18 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                                                 onActionSelect={(text) => chatTextInputRef.current?.appendText(text)}
                                                 defaultTranslationExpanded={session.collapseBilingualTranslation !== false ? false : true}
                                             />
+                                        </div>
+                                        <div className={`chat-msg-meta ${msg.role === "user" ? "chat-msg-meta-user" : "chat-msg-meta-assistant"}`}>
+                                            <span className="chat-msg-meta-time">{formatChatUiTime(msg.createdAt)}</span>
+                                            {msg.role === "user" && (
+                                                <span className="chat-msg-read" title="已读" aria-label="已读">
+                                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                                        <path d="M2 12l5 5L20 6" />
+                                                        <path d="M11 16l2 2 8-9" opacity="0.5" />
+                                                    </svg>
+                                                    已读
+                                                </span>
+                                            )}
                                         </div>
                                         </div>}
                                         {msg.role !== "user" && !isSilentThought && !isEmptyBubble && hasFoldedPanel && (

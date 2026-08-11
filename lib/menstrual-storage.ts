@@ -378,14 +378,33 @@ export function buildMenstrualDayMap(
       setDayState(result, date, { type: "predicted_period", label: "预计经期", shortLabel: "预计" });
     }
 
-    const ovulationDate = addDays(predictedStart, -14);
+    // 排卵期（10 天窗口）：
+    //  - 至少在月经期后 5 天才开始排卵期
+    //  - 排卵期一般持续 10 天
+    //  - 排卵期结束后至少过 7 天才到下一次预测经期
+    const lastPeriodStart = addDays(predictedStart, -config.cycleLength);
+    const lastPeriodEnd = addDays(lastPeriodStart, Math.max(config.periodLength - 1, 0));
+    const minFertileStart = addDays(lastPeriodEnd, 5);
+    const naturalFertileStart = addDays(predictedStart, -16); // 10 天窗口 + 7 天黄体期
+    const fertileStart = naturalFertileStart < minFertileStart ? minFertileStart : naturalFertileStart;
+    const fertileEnd = addDays(fertileStart, 9);
+    const ovulationDate = addDays(fertileStart, 4); // 排卵日 = 排卵期窗口中间
+    // 若排卵期顺延后越过预测经期，则本次经期也顺延到排卵期结束 7 天后
+    const effectivePeriodStart = addDays(fertileEnd, 7) > predictedStart ? addDays(fertileEnd, 7) : predictedStart;
+
+    for (let offset = 0; offset < config.periodLength; offset += 1) {
+      const date = addDays(effectivePeriodStart, offset);
+      if (date < rangeStart || date > rangeEnd) continue;
+      setDayState(result, date, { type: "predicted_period", label: "预计经期", shortLabel: "预计" });
+    }
+
     if (ovulationDate >= rangeStart && ovulationDate <= rangeEnd) {
       setDayState(result, ovulationDate, { type: "ovulation", label: "预计排卵", shortLabel: "排卵" });
     }
-    for (let offset = -5; offset <= 1; offset += 1) {
-      const date = addDays(ovulationDate, offset);
+    for (let offset = 0; offset <= 9; offset += 1) {
+      const date = addDays(fertileStart, offset);
       if (date < rangeStart || date > rangeEnd) continue;
-      setDayState(result, date, { type: "fertile", label: "易孕期", shortLabel: "易孕" });
+      setDayState(result, date, { type: "fertile", label: "排卵期", shortLabel: "排卵" });
     }
 
     predictedStart = addDays(predictedStart, config.cycleLength);

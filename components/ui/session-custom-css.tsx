@@ -16,7 +16,7 @@ import { extractCssImports, scopeSessionCSS } from "@/lib/css-scoper";
  */
 export function SessionCustomCSS({ css, scope }: { css: string; scope: string }) {
     const { imports, body } = useMemo(() => {
-        const extracted = extractCssImports(css || "");
+        const extracted = extractCssImports(typeof css === "string" ? css : String(css ?? ""));
         return { imports: extracted.imports, body: extracted.css };
     }, [css]);
     const scoped = useMemo(() => scopeSessionCSS(body, scope), [body, scope]);

@@ -82,9 +82,9 @@ export function Avatar({
       style={{ width: px, height: px, fontSize: px * 0.4 }}
     >
       {src ? (
-        <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} />
+        <img src={src} alt={String(name ?? "")} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} />
       ) : (
-        <span>{name.charAt(0).toUpperCase()}</span>
+        <span>{String(name ?? "").charAt(0).toUpperCase()}</span>
       )}
     </div>
   );

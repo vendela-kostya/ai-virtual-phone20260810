@@ -142,7 +142,7 @@ const STORY_THEMES = [
 function getStoryPreview(messages: StoryMessage[]): string {
   const last = messages[messages.length - 1];
   if (!last) return "从这里开始新的剧情。";
-  const source = last.renderedContent || last.rawContent || "";
+  const source = String(last.renderedContent || last.rawContent || "");
   // Strip HTML tags and collapse whitespace for preview text
   const text = source.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   return text.slice(0, 60) || "继续上次的场景。";
@@ -1118,7 +1118,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                             className={`story-select-identity-item${active ? " is-active" : ""}`}
                             onClick={() => setPickUserIdentityId(active ? null : identity.id)}
                           >
-                            <Avatar src={identity.avatarUrl || undefined} name={identity.name} size="md" />
+                            <Avatar src={identity.avatarUrl || undefined} name={String(identity.name ?? "")} size="md" />
                             <span className="story-select-identity-name">{identity.name}</span>
                           </button>
                         );
@@ -1471,7 +1471,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                     <img src={currentCharacter.avatar} alt="cover" />
                   ) : (
                     <div className="story-meta-cover-fallback" aria-hidden="true">
-                      <span className="story-meta-cover-char">{currentCharacter.name.trim().charAt(0) || "书"}</span>
+                      <span className="story-meta-cover-char">{String(currentCharacter.name ?? "").trim().charAt(0) || "书"}</span>
                       <span className="story-meta-cover-line" />
                       <span className="story-meta-cover-sub">STORY</span>
                     </div>
@@ -1514,7 +1514,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 ) : null}
                 {visibleMessages.map((message) => {
                   const speakerName = message.role === "user"
-                    ? (userIdentity?.name?.trim() || "我")
+                    ? (String(userIdentity?.name ?? "").trim() || "我")
                     : message.role === "assistant"
                       ? (isMultiSession ? storyDisplayNames : currentCharacter.name)
                       : "系统";

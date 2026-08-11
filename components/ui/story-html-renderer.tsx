@@ -115,7 +115,11 @@ function StoryFoldBlock({ label, content, scopeClass, children }: {
     );
 }
 
-function splitContent(text: string): Segment[] {
+function splitContent(text: unknown): Segment[] {
+    if (typeof text !== "string") {
+        if (text === null || text === undefined) return [];
+        text = String(text);
+    }
     if (!text) return [];
     const segments: Segment[] = [];
     const foldRx = /<!--RHR-FOLD:([^>]+)-->\s*([\s\S]*?)\s*<!--\/RHR-FOLD-->/g;
@@ -386,7 +390,7 @@ export interface StoryHtmlRendererProps {
 
 function StoryHtmlRendererInner({ content, messageId, onOptionSelect, htmlPageMode = "auto", serifIframeFallback = false }: StoryHtmlRendererProps) {
     const segments = useMemo(() => splitContent(content), [content]);
-    const scopeClass = `smsg-${messageId.slice(-8)}`;
+    const scopeClass = `smsg-${String(messageId ?? "").slice(-8)}`;
     const containerRef = useRef<HTMLDivElement>(null);
     useActionDelegate(containerRef, onOptionSelect);
 

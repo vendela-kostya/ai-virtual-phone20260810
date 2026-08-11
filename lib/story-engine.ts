@@ -49,13 +49,14 @@ function escapeTagName(tag: string): string {
   return tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function stripContextExcludedTags(text: string, excludedTags?: string): string {
+function stripContextExcludedTags(text: unknown, excludedTags?: string): string {
+  const safeText = typeof text === "string" ? text : (text === null || text === undefined ? "" : String(text));
   const tags = Array.from(new Set((excludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS).split(",").map(t => t.trim()).filter(Boolean)));
-  if (tags.length === 0) return text;
+  if (tags.length === 0) return safeText;
 
   const tagAlternation = tags.map(escapeTagName).join("|");
   const rx = new RegExp(`<(${tagAlternation})>[\\s\\S]*?<\\/\\1>`, "gi");
-  return text.replace(rx, "").replace(/\n{3,}/g, "\n\n").trim();
+  return safeText.replace(rx, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function toHistoryMessage(message: StoryMessage, contextExcludedTags?: string): ChatMessage {

@@ -126,6 +126,129 @@ export function isMultiStorySession(session: StorySession | null | undefined): b
   return Boolean(session && Array.isArray(session.characterIds) && session.characterIds.length >= 2);
 }
 
+// ── 字段级清洗：旧版本/异常写入可能让 updatedAt/rawContent 等字段出现非字符串值
+// （数字时间戳、对象等），渲染排序/注入时会对它们调字符串方法而抛 TypeError。
+// 这是「错误边界兜住后重试仍打不开」的根因之一：仅靠外层过滤无法覆盖字段级错误。
+// 清洗原则：可修复的字段归一化（尽量保留数据），彻底无法解析的记录才剔除。 ──
+
+function safeString(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return fallback; // object/array/symbol/function → 兜底，避免污染字符串字段
+}
+
+/** 时间戳统一成 ISO 字符串；数字视为毫秒时间戳转换，避免字典序错乱 */
+function normalizeStoryTimestamp(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  const text = safeString(value);
+  if (text) return text;
+  return new Date().toISOString();
+}
+
+function sanitizeStorySession(session: StorySession): StorySession {
+  const next: StorySession = { ...session };
+  let changed = false;
+
+  const updatedAt = normalizeStoryTimestamp(session.updatedAt);
+  if (session.updatedAt !== updatedAt) {
+    next.updatedAt = updatedAt;
+    changed = true;
+  }
+
+  const stringFields = [
+    "title",
+    "customCSS",
+    "foldTags",
+    "contextExcludedTags",
+    "lastMessageId",
+    "lastMessagePreview",
+    "userIdentityId",
+  ] as const;
+  for (const key of stringFields) {
+    const raw = session[key];
+    if (raw === undefined) continue;
+    const cleaned = safeString(raw);
+    if (raw !== cleaned) {
+      (next as Record<string, unknown>)[key] = cleaned;
+      changed = true;
+    }
+  }
+
+  if (session.characterIds !== undefined) {
+    if (!Array.isArray(session.characterIds)) {
+      delete next.characterIds;
+      changed = true;
+    } else {
+      const cleanedIds = session.characterIds
+        .filter((c): c is string => typeof c === "string")
+        .map((c) => c.trim())
+        .filter(Boolean);
+      if (cleanedIds.length !== session.characterIds.length || cleanedIds.some((c, i) => c !== session.characterIds![i])) {
+        next.characterIds = cleanedIds;
+        changed = true;
+      }
+    }
+  }
+
+  if (session.uiPrefs !== undefined && (session.uiPrefs === null || typeof session.uiPrefs !== "object" || Array.isArray(session.uiPrefs))) {
+    next.uiPrefs = {};
+    changed = true;
+  }
+
+  return changed ? next : session;
+}
+
+/** 清洗单条剧情消息；返回 null 表示彻底损坏需剔除（id/sessionId/role 缺失或非法） */
+function sanitizeStoryMessage(m: StoryMessage): StoryMessage | null {
+  if (!m || typeof m !== "object") return null;
+  if (typeof m.id !== "string" || !m.id || typeof m.sessionId !== "string" || !m.sessionId) return null;
+  const role = m.role;
+  if (role !== "user" && role !== "assistant" && role !== "system") return null;
+
+  const createdAt = normalizeStoryTimestamp(m.createdAt);
+  const rawContent = safeString(m.rawContent);
+  let renderedContent = m.renderedContent;
+  if (renderedContent !== undefined && typeof renderedContent !== "string") {
+    renderedContent = safeString(renderedContent) || undefined;
+  }
+  let storySummary = m.storySummary;
+  if (storySummary !== undefined && typeof storySummary !== "string") {
+    storySummary = safeString(storySummary) || undefined;
+  }
+  return {
+    ...m,
+    rawContent,
+    renderedContent,
+    storySummary,
+    createdAt,
+  };
+}
+
+/** 清洗一份剧情存档（含其消息快照）；返回 null 表示彻底损坏需剔除 */
+function sanitizeStorySave(s: StorySave): StorySave | null {
+  if (!s || typeof s !== "object") return null;
+  if (typeof s.id !== "string" || !s.id || typeof s.sessionId !== "string" || !s.sessionId) return null;
+  const createdAt = normalizeStoryTimestamp(s.createdAt);
+  const name = safeString(s.name) || "未命名存档";
+  const rawMessages = Array.isArray(s.messages) ? s.messages : [];
+  const cleanMessages: StoryMessage[] = [];
+  for (const m of rawMessages) {
+    const clean = sanitizeStoryMessage(m);
+    if (clean) cleanMessages.push(clean);
+  }
+  return {
+    ...s,
+    name,
+    createdAt,
+    messageCount: rawMessages.length,
+    messages: cleanMessages,
+  };
+}
+
 function normalizeStorySessions(sessions: StorySession[]): { items: StorySession[]; changed: boolean } {
   const normalized: StorySession[] = [];
   const indexByCharacter = new Map<string, number>();
@@ -147,21 +270,25 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
     const item = id === session.id && characterId === session.characterId
       ? session
       : { ...session, id, characterId };
+    // 字段级清洗：坏类型字段归一化（数字时间戳→ISO、对象→兜底），避免渲染时 TypeError
+    const cleanedItem = sanitizeStorySession(item);
+    if (cleanedItem !== item) changed = true;
+
     // 多人会话用角色组合作为去重 key，与单人会话语义隔离，互不顶替
-    const dedupeKey = isMultiStorySession(item)
-      ? getMultiSessionKey(item.characterIds || [])
+    const dedupeKey = isMultiStorySession(cleanedItem)
+      ? getMultiSessionKey(cleanedItem.characterIds || [])
       : characterId;
     const existingIndex = indexByCharacter.get(dedupeKey);
     if (existingIndex === undefined) {
       indexByCharacter.set(dedupeKey, normalized.length);
-      normalized.push(item);
-      if (item !== session) changed = true;
+      normalized.push(cleanedItem);
+      if (cleanedItem !== session) changed = true;
       continue;
     }
 
     changed = true;
-    if (isPreferredStorySession(item, normalized[existingIndex])) {
-      normalized[existingIndex] = item;
+    if (isPreferredStorySession(cleanedItem, normalized[existingIndex])) {
+      normalized[existingIndex] = cleanedItem;
     }
   }
 
@@ -182,14 +309,33 @@ export async function hydrateStoryStorage(): Promise<void> {
     storyDb.messages.toArray().catch(() => []),
     storyDb.saves.toArray().catch(() => []),
   ]);
-  // 防御：旧版本/异常写入可能产生缺字段或 null 记录，读取时直接剔除，
-  // 避免后续渲染访问 message.role / message.id 时抛 TypeError
-  _messagesCache = messages.filter(
-    (m): m is StoryMessage => !!m && typeof m === "object" && typeof m.id === "string" && typeof m.sessionId === "string",
-  );
-  _savesCache = saves.filter(
-    (s): s is StorySave => !!s && typeof s === "object" && typeof s.id === "string" && typeof s.sessionId === "string",
-  );
+
+  // 字段级清洗：坏类型字段归一化（对象→兜底、数字时间戳→ISO），
+  // 彻底损坏的记录剔除。清洗结果回写数据库，避免每次打开都带着坏数据。
+  let cleaned = false;
+  const cleanMessages: StoryMessage[] = [];
+  for (const m of messages) {
+    const item = sanitizeStoryMessage(m as StoryMessage);
+    if (item) cleanMessages.push(item);
+    else cleaned = true;
+  }
+  const cleanSaves: StorySave[] = [];
+  for (const s of saves) {
+    const item = sanitizeStorySave(s as StorySave);
+    if (item) cleanSaves.push(item);
+    else cleaned = true;
+  }
+  if (cleaned) {
+    void storyDb.transaction("rw", storyDb.messages, storyDb.saves, async () => {
+      await storyDb.messages.clear();
+      if (cleanMessages.length) await storyDb.messages.bulkPut(cleanMessages);
+      await storyDb.saves.clear();
+      if (cleanSaves.length) await storyDb.saves.bulkPut(cleanSaves);
+    }).catch(() => undefined);
+  }
+  _messagesCache = cleanMessages;
+  _savesCache = cleanSaves;
+
   const normalized = normalizeStorySessions(sessions);
   _sessionsCache = normalized.items;
   if (normalized.changed) persistStorySessionsSnapshot(normalized.items);
@@ -427,4 +573,40 @@ export function deleteStorySession(sessionId: string): void {
   storyDb.sessions.delete(sessionId).catch(() => undefined);
   storyDb.messages.where("sessionId").equals(sessionId).delete().catch(() => undefined);
   storyDb.saves.where("sessionId").equals(sessionId).delete().catch(() => undefined);
+}
+
+/**
+ * 强制重新读取并清洗剧情数据（错误边界重试时调用）：
+ * 清空内存缓存 → 重新 hydrate（含字段级清洗与回写），
+ * 让损坏数据在重试前就被修复，而不是反复撞上同一个错误。
+ */
+export async function repairStoryStorageData(): Promise<boolean> {
+  _hydrated = false;
+  _sessionsCache = [];
+  _messagesCache = [];
+  _savesCache = [];
+  try {
+    await hydrateStoryStorage();
+    return true;
+  } catch {
+    // 即使清洗失败也标记为已水合，避免无限重试循环
+    _hydrated = true;
+    return false;
+  }
+}
+
+/**
+ * 清空全部剧情数据（会话/消息/存档）。角色卡、聊天、设置均不受影响。
+ * 仅作为错误边界的最后手段，调用前必须让用户确认。
+ */
+export async function resetStoryStorageData(): Promise<void> {
+  _hydrated = false;
+  _sessionsCache = [];
+  _messagesCache = [];
+  _savesCache = [];
+  await Promise.all([
+    storyDb.sessions.clear().catch(() => undefined),
+    storyDb.messages.clear().catch(() => undefined),
+    storyDb.saves.clear().catch(() => undefined),
+  ]);
 }

@@ -132,6 +132,12 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
   let changed = false;
 
   for (const session of sessions) {
+    // 防御：旧版本/异常写入可能在 sessions 表里留下 null 或非对象记录，
+    // 直接跳过而不是让 normalize/渲染崩溃（剧情模式曾整页 client-side exception）
+    if (!session || typeof session !== "object") {
+      changed = true;
+      continue;
+    }
     const id = session.id?.trim();
     const characterId = session.characterId?.trim();
     if (!id || !characterId) {
@@ -176,8 +182,14 @@ export async function hydrateStoryStorage(): Promise<void> {
     storyDb.messages.toArray().catch(() => []),
     storyDb.saves.toArray().catch(() => []),
   ]);
-  _messagesCache = messages;
-  _savesCache = saves;
+  // 防御：旧版本/异常写入可能产生缺字段或 null 记录，读取时直接剔除，
+  // 避免后续渲染访问 message.role / message.id 时抛 TypeError
+  _messagesCache = messages.filter(
+    (m): m is StoryMessage => !!m && typeof m === "object" && typeof m.id === "string" && typeof m.sessionId === "string",
+  );
+  _savesCache = saves.filter(
+    (s): s is StorySave => !!s && typeof s === "object" && typeof s.id === "string" && typeof s.sessionId === "string",
+  );
   const normalized = normalizeStorySessions(sessions);
   _sessionsCache = normalized.items;
   if (normalized.changed) persistStorySessionsSnapshot(normalized.items);

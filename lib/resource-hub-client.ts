@@ -156,6 +156,8 @@ function normalizeIndex(raw: unknown): ShareIndex {
             images: Array.isArray(item.images) ? item.images.filter((v): v is string => typeof v === "string") : [],
             description: typeof item.description === "string" ? item.description : "",
             author: typeof item.author === "string" ? item.author : "",
+            avatar: typeof item.avatar === "string" ? item.avatar : "",
+            ownerHash: typeof item.ownerHash === "string" ? item.ownerHash.toLowerCase() : "",
             updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : null,
         });
     }
@@ -383,9 +385,10 @@ export async function importResourceHubFile(
             const { loadCustomAppPackage, loadSingleHtmlCustomApp, installCustomAppAsync } = await import("./custom-app-storage");
             const { applyCustomAppRegistrationsAsync } = await import("./custom-app-registration");
             const app = lower.endsWith(".zip") ? await loadCustomAppPackage(file) : await loadSingleHtmlCustomApp(file);
-            const installed = await installCustomAppAsync(app);
+            // 打来源标记：别人的作品，本机能玩，但不进本地测试、不能再发布到应用广场
+            const installed = await installCustomAppAsync({ ...app, resourceHubPath: path });
             await applyCustomAppRegistrationsAsync(installed);
-            return `应用「${installed.name}」已安装，桌面可找到图标`;
+            return `应用「${installed.name}」已安装，桌面可找到图标（集市来的作品仅供本机使用，不能再发布）`;
         }
         case "game": {
             const payload = JSON.parse(await fetchResourceHubText(source, path)) as { type?: string; title?: string; draft?: unknown };
@@ -399,12 +402,14 @@ export async function importResourceHubFile(
                     id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                     title,
                     draft: payload.draft as GameTemplateDraft,
+                    // 别人的作品：本机可试玩，不能发布到共享大厅
+                    importedFrom: path,
                     createdAt: now,
                     updatedAt: now,
                 },
                 ...loadGameDrafts(),
             ]);
-            return `游戏草稿「${title}」已导入草稿箱，可在游戏工作室查看发布`;
+            return `游戏草稿「${title}」已导入草稿箱，可在游戏工作室试玩（集市来的作品不能发布到大厅）`;
         }
         case "theater": {
             const payload = JSON.parse(await fetchResourceHubText(source, path)) as { type?: string; title?: string; draft?: unknown };
@@ -422,11 +427,13 @@ export async function importResourceHubFile(
                 id: `bmdraft_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
                 title,
                 draft: payload.draft,
+                // 别人的作品：本机可用，不能上架到黑市
+                importedFrom: path,
                 createdAt: now,
                 updatedAt: now,
             });
             kvSet(key, JSON.stringify(drafts.slice(0, 80)));
-            return `剧场草稿「${title}」已导入草稿箱，可在黑市工作室查看上架`;
+            return `剧场草稿「${title}」已导入草稿箱，可在黑市工作室查看（集市来的作品不能上架）`;
         }
         case "plugin": {
             const code = await fetchResourceHubText(source, path);

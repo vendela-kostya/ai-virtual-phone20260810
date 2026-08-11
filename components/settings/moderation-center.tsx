@@ -7,11 +7,15 @@ import { useCallback, useEffect, useState } from "react";
 import { Loader2, RefreshCw, Search, ShieldCheck } from "lucide-react";
 
 import { ConfirmDialog } from "../ui/modal";
+import { Toggle } from "../ui/form";
 import { fetchReports, moderationApi, type ContentReport } from "@/lib/moderation-client";
 import { fetchCustomAppMarketAdminItems, reviewCustomAppMarketItem } from "@/lib/custom-app-market-client";
 import type { CustomAppMarketItem } from "@/lib/custom-app-market-types";
 import {
   approveShareSubmission,
+  canManageShareRepo,
+  fetchAutoApprove,
+  setAutoApprove,
   fetchShareSubmissionFiles,
   listShareSubmissions,
   rejectShareSubmission,
@@ -115,11 +119,16 @@ export function ModerationCenter({ onNotice }: { onNotice?: (msg: string) => voi
   // ── 集市审核（share 仓库待审投稿；权限由 GitHub 服务端裁决）──
   const [shareItems, setShareItems] = useState<ShareSubmission[]>([]);
   const [shareLoading, setShareLoading] = useState(false);
-  const [shareBusy, setShareBusy] = useState<Record<number, boolean>>({});
+  // 记录正在进行的动作，按钮上好显示「上架中…/拒绝中…」
+  const [shareBusy, setShareBusy] = useState<Record<number, "approve" | "reject">>({});
   const [shareExpanded, setShareExpanded] = useState<number | null>(null);
   const [shareFiles, setShareFiles] = useState<Record<number, ShareSubmissionFile[] | "loading">>({});
   const [shareRejectFor, setShareRejectFor] = useState<number | null>(null);
   const [shareRejectReason, setShareRejectReason] = useState("");
+  // 自动审核：开关存在资源仓库里，只有对仓库有写权限的人才改得动
+  const [autoApprove, setAutoApproveState] = useState(false);
+  const [canManageRepo, setCanManageRepo] = useState(false);
+  const [autoApproveBusy, setAutoApproveBusy] = useState(false);
 
   const loadShareItems = useCallback(async () => {
     setShareLoading(true);
@@ -137,6 +146,34 @@ export function ModerationCenter({ onNotice }: { onNotice?: (msg: string) => voi
     if (tab === "share") void loadShareItems();
   }, [tab, loadShareItems]);
 
+  useEffect(() => {
+    if (tab !== "share") return;
+    let cancelled = false;
+    void (async () => {
+      const [manage, auto] = await Promise.all([
+        canManageShareRepo(),
+        fetchAutoApprove().catch(() => false),
+      ]);
+      if (cancelled) return;
+      setCanManageRepo(manage);
+      setAutoApproveState(auto);
+    })();
+    return () => { cancelled = true; };
+  }, [tab]);
+
+  const toggleAutoApprove = async (next: boolean) => {
+    setAutoApproveBusy(true);
+    try {
+      await setAutoApprove(next);
+      setAutoApproveState(next);
+      onNotice?.(next ? "已开启自动审核：新投稿会直接上架" : "已关闭自动审核：新投稿重新排队等人工");
+    } catch (error) {
+      onNotice?.(error instanceof Error ? error.message : "改不动这个开关（需要资源仓库的写权限）");
+    } finally {
+      setAutoApproveBusy(false);
+    }
+  };
+
   const toggleShareDetail = async (item: ShareSubmission) => {
     if (shareExpanded === item.number) { setShareExpanded(null); return; }
     setShareExpanded(item.number);
@@ -153,7 +190,7 @@ export function ModerationCenter({ onNotice }: { onNotice?: (msg: string) => voi
   };
 
   const runShareAction = async (item: ShareSubmission, action: "approve" | "reject", reason?: string) => {
-    setShareBusy(current => ({ ...current, [item.number]: true }));
+    setShareBusy(current => ({ ...current, [item.number]: action }));
     try {
       if (action === "approve") {
         await approveShareSubmission(item.number);
@@ -321,6 +358,19 @@ export function ModerationCenter({ onNotice }: { onNotice?: (msg: string) => voi
             <span style={subStyle}>资源集市的待审投稿（通过 = 上架；拒绝可留言）</span>
             <button type="button" style={{ ...btnStyle, display: "inline-flex", alignItems: "center", gap: 4 }} onClick={() => void loadShareItems()}><RefreshCw size={12} />刷新</button>
           </div>
+          {canManageRepo ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", marginBottom: 12, borderRadius: 12, background: "var(--surface-inset, rgba(0,0,0,.03))" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>自动审核</div>
+                <div style={{ ...subStyle, marginTop: 2 }}>
+                  开启后新投稿直接上架、不再排队。任何人传的东西都会立刻公开，只能事后下架。
+                </div>
+              </div>
+              {autoApproveBusy
+                ? <Loader2 size={16} className="animate-spin" />
+                : <Toggle checked={autoApprove} onChange={next => void toggleAutoApprove(next)} />}
+            </div>
+          ) : null}
           {shareLoading ? <p style={subStyle}><Loader2 size={13} className="animate-spin" style={{ verticalAlign: -2 }} /> 加载中…</p> : null}
           {!shareLoading && shareItems.length === 0 ? <p style={subStyle}>没有待审核的投稿。</p> : null}
           {shareItems.map(item => {
@@ -362,16 +412,24 @@ export function ModerationCenter({ onNotice }: { onNotice?: (msg: string) => voi
                       placeholder="拒绝理由（可选，投稿人可见）"
                       style={{ flex: 1, minWidth: 0, border: "1px solid var(--border-soft, rgba(0,0,0,.1))", borderRadius: 10, padding: "6px 10px", fontSize: 12, background: "var(--surface-inset, rgba(0,0,0,.03))", color: "inherit", outline: "none" }}
                     />
-                    <button type="button" style={dangerBtn} disabled={shareBusy[item.number]} onClick={() => void runShareAction(item, "reject", shareRejectReason)}>确认拒绝</button>
+                    <button type="button" style={dangerBtn} disabled={!!shareBusy[item.number]} onClick={() => void runShareAction(item, "reject", shareRejectReason)}>
+                      {shareBusy[item.number] === "reject"
+                        ? <><Loader2 size={12} className="animate-spin" style={{ verticalAlign: -2 }} /> 拒绝中…</>
+                        : "确认拒绝"}
+                    </button>
                     <button type="button" style={btnStyle} onClick={() => { setShareRejectFor(null); setShareRejectReason(""); }}>取消</button>
                   </div>
                 ) : (
                   <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                    <button type="button" style={btnStyle} disabled={shareBusy[item.number]} onClick={() => void toggleShareDetail(item)}>
+                    <button type="button" style={btnStyle} disabled={!!shareBusy[item.number]} onClick={() => void toggleShareDetail(item)}>
                       {expanded ? "收起内容" : "查看内容"}
                     </button>
-                    <button type="button" style={btnStyle} disabled={shareBusy[item.number]} onClick={() => void runShareAction(item, "approve")}>通过并上架</button>
-                    <button type="button" style={dangerBtn} disabled={shareBusy[item.number]} onClick={() => setShareRejectFor(item.number)}>拒绝</button>
+                    <button type="button" style={btnStyle} disabled={!!shareBusy[item.number]} onClick={() => void runShareAction(item, "approve")}>
+                      {shareBusy[item.number] === "approve"
+                        ? <><Loader2 size={12} className="animate-spin" style={{ verticalAlign: -2 }} /> 上架中…</>
+                        : "通过并上架"}
+                    </button>
+                    <button type="button" style={dangerBtn} disabled={!!shareBusy[item.number]} onClick={() => setShareRejectFor(item.number)}>拒绝</button>
                   </div>
                 )}
               </div>

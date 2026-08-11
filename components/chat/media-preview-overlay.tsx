@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
 const ACTION_BUTTON_STYLE: CSSProperties = {
@@ -34,6 +34,8 @@ export function MediaPreviewOverlay({
     regenerating?: boolean;
     onClose: () => void;
 }) {
+    // 保存要重新拉一次图片，慢网络下会卡一下——按钮上给个状态
+    const [saving, setSaving] = useState(false);
     if (typeof document === "undefined") return null;
     return createPortal(
         <div
@@ -54,15 +56,21 @@ export function MediaPreviewOverlay({
                 {imageUrl && saveFilename && (
                     <button
                         onPointerDown={e => e.stopPropagation()}
+                        disabled={saving}
                         onClick={async e => {
                             e.stopPropagation();
                             e.preventDefault();
-                            const { downloadUrl } = await import("@/lib/download-utils");
-                            await downloadUrl(imageUrl, saveFilename);
+                            setSaving(true);
+                            try {
+                                const { downloadUrl } = await import("@/lib/download-utils");
+                                await downloadUrl(imageUrl, saveFilename);
+                            } finally {
+                                setSaving(false);
+                            }
                         }}
                         style={ACTION_BUTTON_STYLE}
                     >
-                        保存图片
+                        {saving ? "保存中…" : "保存图片"}
                     </button>
                 )}
                 {onRegenerate && (

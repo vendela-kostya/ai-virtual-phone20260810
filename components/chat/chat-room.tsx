@@ -3351,8 +3351,8 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
             showChatToast("记忆内容不能为空");
             return;
         }
-        if (content.length > 3000) {
-            showChatToast("记忆内容过长，请控制在 3000 字以内");
+        if (content.length > 100000) {
+            showChatToast("记忆内容过长，请控制在 100000 字以内");
             return;
         }
         setMemorySaving(true);
@@ -6209,7 +6209,7 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             <button
                                 className="modal-header-btn modal-header-btn-action"
                                 onClick={handleSaveManualMemory}
-                                disabled={memorySaving || !memoryDraft.trim() || memoryDraft.trim().length > 3000}
+                                disabled={memorySaving || !memoryDraft.trim() || memoryDraft.trim().length > 100000}
                             >
                                 <Check size={18} />
                             </button>
@@ -6226,12 +6226,12 @@ export function ChatRoom({ session, onBack }: ChatRoomProps) {
                             />
                             <div className="flex items-center justify-between" style={{ fontSize: 11, color: memoryDraft.trim().length > 3000 ? "#c2413a" : "var(--c-icon)", opacity: 0.8 }}>
                                 <span>LONG TERM</span>
-                                <span>{memoryDraft.trim().length}/3000</span>
+                                <span>{memoryDraft.trim().length}/100000</span>
                             </div>
                             <button
                                 className="ui-btn ui-btn-primary w-full"
                                 onClick={handleSaveManualMemory}
-                                disabled={memorySaving || !memoryDraft.trim() || memoryDraft.trim().length > 3000}
+                                disabled={memorySaving || !memoryDraft.trim() || memoryDraft.trim().length > 100000}
                             >
                                 {memorySaving ? "保存中..." : "保存记忆"}
                             </button>

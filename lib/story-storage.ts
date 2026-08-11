@@ -21,6 +21,8 @@ export type StorySession = {
   lastMessagePreview?: string;
   /** 多人剧情：参与角色 id 列表（≥2 时视为多人会话）。characterId 仍存主角色 id。 */
   characterIds?: string[];
+  /** 进入剧情时手动指定的用户身份 id；缺省时按绑定级联解析（角色→全局→默认）。 */
+  userIdentityId?: string;
 };
 
 export type StoryMessageRole = "user" | "assistant" | "system";
@@ -403,4 +405,14 @@ export function createStorySave(
 export function deleteStorySave(saveId: string): void {
   _savesCache = _savesCache.filter((save) => save.id !== saveId);
   storyDb.saves.delete(saveId).catch(() => undefined);
+}
+
+/** 删除一个剧情会话及其全部消息与存档（开屏「继续之前的多剧情」双击删除用） */
+export function deleteStorySession(sessionId: string): void {
+  _sessionsCache = _sessionsCache.filter((session) => session.id !== sessionId);
+  _messagesCache = _messagesCache.filter((message) => message.sessionId !== sessionId);
+  _savesCache = _savesCache.filter((save) => save.sessionId !== sessionId);
+  storyDb.sessions.delete(sessionId).catch(() => undefined);
+  storyDb.messages.where("sessionId").equals(sessionId).delete().catch(() => undefined);
+  storyDb.saves.where("sessionId").equals(sessionId).delete().catch(() => undefined);
 }

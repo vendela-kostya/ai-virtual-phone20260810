@@ -41,7 +41,7 @@ import { StoryHtmlRenderer } from "@/components/ui/story-html-renderer";
 import { loadCharacters } from "@/lib/character-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
 import { incrementEventCounter } from "@/lib/memory-storage";
-import { resolveUserIdentity } from "@/lib/settings-storage";
+import { loadUserIdentities, resolveUserIdentity } from "@/lib/settings-storage";
 import {
   generateStoryCompletion,
   generateMultiStoryCompletion,
@@ -63,6 +63,7 @@ import {
   listStorySaves,
   createStorySave,
   deleteStorySave,
+  deleteStorySession,
   getStorySave,
   isMultiStorySession,
   type StoryMessage,
@@ -296,6 +297,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [mode, setMode] = useState<"select" | "story">("select");
   const [multiMode, setMultiMode] = useState(false);
   const [multiPickIds, setMultiPickIds] = useState<string[]>([]);
+  // 开屏手动选择的用户身份；null 表示跟随角色绑定解析
+  const [pickUserIdentityId, setPickUserIdentityId] = useState<string | null>(null);
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
@@ -315,11 +318,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const cacheRefreshKeyRef = useRef<string | null>(null);
   const composerAppendIdRef = useRef(0);
   const loadMoreRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
-  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longPressTriggeredRef = useRef(false);
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTapRef = useRef<{ msgId: string; time: number } | null>(null);
+  const continueTapRef = useRef<{ timer: number | null; sessionId: string | null }>({ timer: null, sessionId: null });
 
   const characters = useMemo(() => loadCharacters(), []);
+  const identities = useMemo(() => loadUserIdentities(), [storageVersion]);
   const sessions = loadStorySessions();
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || null,
@@ -339,10 +343,14 @@ export function StoryApp({ onClose }: StoryAppProps) {
     () => characters.find((character) => character.id === mainCharacterId) || null,
     [characters, mainCharacterId]
   );
-  const userIdentity = useMemo(
-    () => resolveUserIdentity(mainCharacterId, "story") ?? resolveUserIdentity(mainCharacterId) ?? resolveUserIdentity(),
-    [mainCharacterId]
-  );
+  const userIdentity = useMemo(() => {
+    // 会话级手动指定的身份优先；否则按绑定级联解析（角色→全局→默认）
+    if (currentSession?.userIdentityId) {
+      const found = loadUserIdentities().find((identity) => identity.id === currentSession.userIdentityId);
+      if (found) return found;
+    }
+    return resolveUserIdentity(mainCharacterId, "story") ?? resolveUserIdentity(mainCharacterId) ?? resolveUserIdentity();
+  }, [currentSession?.userIdentityId, mainCharacterId]);
   const uiPrefs = currentSession?.uiPrefs || {};
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
   // 存档开关：默认开启；按角色（会话）独立记忆
@@ -378,6 +386,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   // 单人入口：从模式选择页进入某角色会话
   function enterSingleSession(characterId: string) {
     const session = createOrGetStorySession(characterId);
+    // 手动指定了身份时写入会话，之后该会话固定使用这个身份
+    if (pickUserIdentityId) updateStorySession(session.id, { userIdentityId: pickUserIdentityId });
     setActiveCharacterId(characterId);
     setActiveSessionId(session.id);
     activeSessionIdRef.current = session.id;
@@ -394,6 +404,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   // 多人入口：两个（或多个）角色一起开始剧情
   function enterMultiSession(ids: string[]) {
     const session = createOrGetMultiStorySession(ids);
+    // 手动指定了身份时写入会话，之后该会话固定使用这个身份
+    if (pickUserIdentityId) updateStorySession(session.id, { userIdentityId: pickUserIdentityId });
     setActiveSessionId(session.id);
     activeSessionIdRef.current = session.id;
     setVisibleMessageCount(STORY_INITIAL_LOAD);
@@ -412,6 +424,30 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (prev.length >= 2) return prev; // 最多两个角色
       return [...prev, characterId];
     });
+  }
+
+  // 开屏「继续之前的多剧情」：单击进入，双击删除该段剧情（含消息与存档）
+  function handleContinueSessionTap(session: StorySession) {
+    const pending = continueTapRef.current;
+    if (pending && pending.sessionId === session.id && pending.timer != null) {
+      clearTimeout(pending.timer);
+      continueTapRef.current = { timer: null, sessionId: null };
+      const names = (session.characterIds || [])
+        .map((id) => characters.find((c) => c.id === id)?.name || id)
+        .join(" & ");
+      if (window.confirm(`删除「${names}」这段剧情？\n其中的消息记录与存档将一并删除，此操作不可恢复。`)) {
+        deleteStorySession(session.id);
+        setStorageVersion((v) => v + 1);
+      }
+      return;
+    }
+    continueTapRef.current = {
+      sessionId: session.id,
+      timer: window.setTimeout(() => {
+        continueTapRef.current = { timer: null, sessionId: null };
+        enterMultiSession(session.characterIds || []);
+      }, 320),
+    };
   }
 
   useEffect(() => {
@@ -614,7 +650,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (cancelled) return;
       let rebuilt: StoryMessage[];
       try {
-        rebuilt = rebuildStorySessionRenderCache(activeCharacterId, currentSession.id, { sessionFoldTags: currentSession.foldTags });
+        rebuilt = rebuildStorySessionRenderCache(activeCharacterId, currentSession.id, { sessionFoldTags: currentSession.foldTags, userIdentityId: currentSession.userIdentityId });
       } catch {
         if (cacheRefreshKeyRef.current === refreshKey) cacheRefreshKeyRef.current = null;
         return;
@@ -733,11 +769,13 @@ export function StoryApp({ onClose }: StoryAppProps) {
         ? await generateMultiStoryCompletion(generationCharacterIds, historyForGeneration, {
             sessionFoldTags: currentSession?.foldTags,
             sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            userIdentityId: currentSession?.userIdentityId,
             signal: generationRun.controller.signal,
           })
         : await generateStoryCompletion(characterId, historyForGeneration, {
             sessionFoldTags: currentSession?.foldTags,
             sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            userIdentityId: currentSession?.userIdentityId,
             signal: generationRun.controller.signal,
           });
       if (!isCurrentGeneration()) return;
@@ -832,34 +870,32 @@ export function StoryApp({ onClose }: StoryAppProps) {
     };
   }
 
+  // 双击消息气泡打开操作菜单（复制/编辑/重试/删除等）；PC 端仍保留右键菜单
   function handleMsgPointerDown(e: React.PointerEvent, msgId: string) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     // Don't preventDefault — it blocks clicks on <details>, <summary>, <input> etc. inside messages
     startPosRef.current = { x: e.clientX, y: e.clientY };
-    longPressTriggeredRef.current = false;
-    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = setTimeout(() => {
-      longPressTriggeredRef.current = true;
-      const point = startPosRef.current ?? { x: e.clientX, y: e.clientY };
+  }
+  function handleMsgPointerUp(e: React.PointerEvent, msgId: string) {
+    const start = startPosRef.current;
+    startPosRef.current = null;
+    if (!start) return;
+    // 拖动/滑动超过阈值不视为点击
+    if (Math.abs(e.clientX - start.x) > 12 || Math.abs(e.clientY - start.y) > 12) return;
+    if (editingMessageId === msgId) return; // 编辑中不触发菜单
+    const now = Date.now();
+    const last = lastTapRef.current;
+    if (last && last.msgId === msgId && now - last.time < 300) {
+      lastTapRef.current = null;
+      const point = { x: e.clientX, y: e.clientY };
       setContextMenuPoint(getClampedContextMenuPoint(point.x, point.y));
       setActiveMessageId(msgId);
-      longPressTimerRef.current = null;
-    }, 500);
-  }
-  function handleMsgPointerMove(e: React.PointerEvent) {
-    if (!startPosRef.current) return;
-    if (Math.abs(e.clientX - startPosRef.current.x) > 10 || Math.abs(e.clientY - startPosRef.current.y) > 10) {
-      if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; }
+    } else {
+      lastTapRef.current = { msgId, time: now };
     }
   }
-  function handleMsgPointerUp(e: React.PointerEvent) {
-    startPosRef.current = null;
-    if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; }
-    if (longPressTriggeredRef.current) { e.stopPropagation(); e.preventDefault(); longPressTriggeredRef.current = false; }
-  }
   function handleMsgPointerCancel() {
-    startPosRef.current = null; longPressTriggeredRef.current = false;
-    if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; }
+    startPosRef.current = null;
   }
 
   function handleStoryDelete(msgId: string) {
@@ -947,11 +983,13 @@ export function StoryApp({ onClose }: StoryAppProps) {
         ? await generateMultiStoryCompletion(retryCharacterIds, contextMessages, {
             sessionFoldTags: currentSession?.foldTags,
             sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            userIdentityId: currentSession?.userIdentityId,
             signal: generationRun.controller.signal,
           })
         : await generateStoryCompletion(characterId, contextMessages, {
             sessionFoldTags: currentSession?.foldTags,
             sessionContextExcludedTags: currentSession?.contextExcludedTags,
+            userIdentityId: currentSession?.userIdentityId,
             signal: generationRun.controller.signal,
           });
       if (!isCurrentGeneration()) return;
@@ -1062,6 +1100,33 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   {multiMode ? "选择两位角色，与你共同开始剧情" : "选择一位角色，开始你们的剧情"}
                 </div>
 
+                <div className="story-select-identity">
+                  <div className="story-select-identity-head">
+                    <span className="story-drawer-eyebrow" style={{ marginBottom: 0 }}>你的身份</span>
+                    <span className="story-select-identity-sub">选一个身份作为「你」；不选则跟随角色绑定</span>
+                  </div>
+                  {identities.length === 0 ? (
+                    <div className="story-select-identity-empty">暂无身份卡片，可在「设置 → 用户身份」中创建。未选时以「我」的身份进入。</div>
+                  ) : (
+                    <div className="story-select-identity-list">
+                      {identities.map((identity) => {
+                        const active = pickUserIdentityId === identity.id;
+                        return (
+                          <button
+                            key={identity.id}
+                            type="button"
+                            className={`story-select-identity-item${active ? " is-active" : ""}`}
+                            onClick={() => setPickUserIdentityId(active ? null : identity.id)}
+                          >
+                            <Avatar src={identity.avatarUrl || undefined} name={identity.name} size="md" />
+                            <span className="story-select-identity-name">{identity.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
                 <div className="story-select-char-list">
                   {characters.map((character) => {
                     const picked = multiMode && multiPickIds.includes(character.id);
@@ -1116,14 +1181,15 @@ export function StoryApp({ onClose }: StoryAppProps) {
                         <button
                           key={session.id}
                           type="button"
-                          className="story-tool-btn"
+                          className="story-tool-btn story-continue-item"
                           style={{ marginBottom: 8, textAlign: "left", padding: "10px 14px", lineHeight: 1.5 }}
-                          onClick={() => enterMultiSession(session.characterIds || [])}
+                          onClick={() => handleContinueSessionTap(session)}
                         >
                           {names}
                           <span style={{ display: "block", fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95,82,61,0.72))", marginTop: 2 }}>
                             {session.lastMessagePreview ? `…${session.lastMessagePreview}` : "尚未开始"}
                           </span>
+                          <span className="story-continue-del-hint">双击删除这段剧情</span>
                         </button>
                       );
                     })}
@@ -1348,7 +1414,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
             className="story-tool-btn"
             onClick={() => {
               try {
-                const rebuilt = rebuildStorySessionRenderCache(mainCharacterId, currentSession.id, { sessionFoldTags: currentSession.foldTags });
+                const rebuilt = rebuildStorySessionRenderCache(mainCharacterId, currentSession.id, { sessionFoldTags: currentSession.foldTags, userIdentityId: currentSession.userIdentityId });
                 setMessages(rebuilt);
                 setStorageVersion((value) => value + 1);
                 alert(`缓存重建完成，${rebuilt.length} 条消息已更新`);
@@ -1463,8 +1529,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                       className="story-row"
                       data-role={message.role}
                       onPointerDown={(e) => handleMsgPointerDown(e, message.id)}
-                      onPointerMove={handleMsgPointerMove}
-                      onPointerUp={handleMsgPointerUp}
+                      onPointerUp={(e) => handleMsgPointerUp(e, message.id)}
                       onPointerCancel={handleMsgPointerCancel}
                       onContextMenu={(e) => {
                         e.preventDefault();

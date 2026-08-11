@@ -7,6 +7,7 @@ import {
   loadWorldBooks,
   resolveBinding,
   resolveUserIdentity,
+  loadUserIdentities,
 } from "./settings-storage";
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
@@ -66,6 +67,17 @@ function toHistoryMessage(message: StoryMessage, contextExcludedTags?: string): 
     status: "sent",
     createdAt: message.createdAt,
   };
+}
+
+/**
+ * 用户身份解析：会话级手动指定（userIdentityId）优先；否则走绑定级联（角色→全局→默认）。
+ */
+function resolveStoryUserIdentity(characterId: string, userIdentityId?: string) {
+  if (userIdentityId) {
+    const found = loadUserIdentities().find((identity) => identity.id === userIdentityId);
+    if (found) return found;
+  }
+  return resolveUserIdentity(characterId, "story");
 }
 
 function resolveStoryConfigs(characterId: string): {
@@ -136,7 +148,7 @@ export function getStoryRenderSignature(characterId: string): { regexSignature: 
 export async function generateStoryCompletion(
   characterId: string,
   history: StoryMessage[],
-  options?: { sessionFoldTags?: string; sessionContextExcludedTags?: string; signal?: AbortSignal },
+  options?: { sessionFoldTags?: string; sessionContextExcludedTags?: string; userIdentityId?: string; signal?: AbortSignal },
 ): Promise<StoryGenerationResult> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -146,9 +158,9 @@ export async function generateStoryCompletion(
   const { apiConfig, preset, regexes, worldBooks, regexSignature, summaryTag } = resolveStoryConfigs(characterId);
   const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
+  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.userIdentityId);
 
-  const userIdentity = resolveUserIdentity(characterId, "story");
+  const userIdentity = resolveStoryUserIdentity(characterId, options?.userIdentityId);
   const macroEngine = new MacroEngine(character.name, userIdentity?.name ?? "用户");
 
   const rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, {
@@ -180,7 +192,7 @@ export async function generateStoryCompletion(
 export async function generateMultiStoryCompletion(
   characterIds: string[],
   history: StoryMessage[],
-  options?: { sessionFoldTags?: string; sessionContextExcludedTags?: string; signal?: AbortSignal },
+  options?: { sessionFoldTags?: string; sessionContextExcludedTags?: string; userIdentityId?: string; signal?: AbortSignal },
 ): Promise<StoryGenerationResult> {
   const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)));
   if (uniqueIds.length < 2) {
@@ -195,9 +207,9 @@ export async function generateMultiStoryCompletion(
   const { apiConfig, preset, regexes, worldBooks, regexSignature, summaryTag } = resolveStoryConfigs(mainCharacterId);
   const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(mainCharacterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
+  const llmMessages = await buildStoryPromptMessages(mainCharacterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.userIdentityId);
 
-  const userIdentity = resolveUserIdentity(mainCharacterId, "story");
+  const userIdentity = resolveStoryUserIdentity(mainCharacterId, options?.userIdentityId);
   const userName = userIdentity?.name ?? "用户";
   const nameOf = (id: string): string => loadCharacters().find((c) => c.id === id)?.name || id;
   const allNames = uniqueIds.map(nameOf);
@@ -256,13 +268,14 @@ async function buildStoryPromptMessages(
   regexes: RegexConfig[],
   worldBooks: WorldBookConfig[],
   contextExcludedTags: string = DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
+  userIdentityId?: string,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
     throw new ChatEngineError(`Character not found: ${characterId}`);
   }
 
-  const userIdentity = resolveUserIdentity(characterId, "story");
+  const userIdentity = resolveStoryUserIdentity(characterId, userIdentityId);
   const historyMessages = history.map((message) => toHistoryMessage(message, contextExcludedTags));
   const memConfig = loadMemoryConfig();
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "story", {
@@ -298,7 +311,7 @@ async function buildStoryPromptMessages(
 export async function previewStoryPromptPayload(
   characterId: string,
   history: StoryMessage[],
-  options?: { sessionContextExcludedTags?: string },
+  options?: { sessionContextExcludedTags?: string; userIdentityId?: string },
 ): Promise<StoryPreviewResult> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -306,7 +319,7 @@ export async function previewStoryPromptPayload(
   }
   const { apiConfig, preset, regexes, worldBooks } = resolveStoryConfigs(characterId);
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
+  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.userIdentityId);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
     characterName: character.name,
@@ -315,13 +328,13 @@ export async function previewStoryPromptPayload(
   };
 }
 
-export function rebuildStorySessionRenderCache(characterId: string, sessionId: string, options?: { sessionFoldTags?: string }): StoryMessage[] {
+export function rebuildStorySessionRenderCache(characterId: string, sessionId: string, options?: { sessionFoldTags?: string; userIdentityId?: string }): StoryMessage[] {
   const { regexSignature, parserVersion } = getStoryRenderSignature(characterId);
   const { regexes, summaryTag } = resolveStoryConfigs(characterId);
   const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
 
   const character = loadCharacters().find((c) => c.id === characterId);
-  const userIdentity = resolveUserIdentity(characterId, "story");
+  const userIdentity = resolveStoryUserIdentity(characterId, options?.userIdentityId);
   const macroEngine = new MacroEngine(character?.name ?? "", userIdentity?.name ?? "用户");
 
   const rebuilt = loadStoryMessages(sessionId).map((message) => {

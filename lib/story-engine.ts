@@ -19,7 +19,8 @@ import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from
 import { getWeekStartIso } from "./calendar-utils";
 import { parseStoryResponse } from "./story-parser";
 import { STORY_PARSER_VERSION } from "./story-parser";
-import { loadStoryMessages, replaceStoryMessages, type StoryMessage } from "./story-storage";
+import { loadStoryMessages, replaceStoryMessages, STORY_MAX_CAST_SIZE, type StoryMessage } from "./story-storage";
+import type { Character } from "./character-types";
 import type { ChatMessage } from "./chat-storage";
 import { MacroEngine } from "./macro-engine";
 
@@ -173,16 +174,37 @@ export async function generateStoryCompletion(
   };
 }
 
+function clipForPrompt(text: string, maxLength: number): string {
+  const plain = text.replace(/\s+/g, " ").trim();
+  return plain.length <= maxLength ? plain : `${plain.slice(0, maxLength)}…`;
+}
+
+/**
+ * 把多人角色卡与规则并入首条 system 消息正文。
+ * 不新增 role 边界：原先 unshift 一条 system 会与首条 system 连成「连续 system」，
+ * 部分接口会因此拒收整次请求；并入正文则不改动任何已有的注入深度与顺序。
+ */
+function injectStoryCastBlock(messages: LLMMessage[], block: string): void {
+  const systemIndex = messages.findIndex((m) => m.role === "system" && typeof m.content === "string");
+  if (systemIndex === -1) {
+    messages.unshift({ role: "system", content: block });
+    return;
+  }
+  const target = messages[systemIndex];
+  messages[systemIndex] = { ...target, content: `${target.content as string}\n\n${block}` };
+}
+
 /**
  * 多人剧情生成：以主角色（第一个）走完整单人链路（世界书/记忆/正则/预设），
- * 再在 prompt 最前注入其余角色卡 + 多人剧情规则，让 LLM 同时演绎多个角色。
+ * 再注入其余角色卡 + 多人剧情规则，让 LLM 同时演绎全部参演角色（上限 STORY_MAX_CAST_SIZE）。
  */
 export async function generateMultiStoryCompletion(
   characterIds: string[],
   history: StoryMessage[],
   options?: { sessionFoldTags?: string; sessionContextExcludedTags?: string; signal?: AbortSignal },
 ): Promise<StoryGenerationResult> {
-  const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)));
+  const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)))
+    .slice(0, STORY_MAX_CAST_SIZE);
   if (uniqueIds.length < 2) {
     return generateStoryCompletion(uniqueIds[0] || "", history, options);
   }
@@ -199,32 +221,41 @@ export async function generateMultiStoryCompletion(
 
   const userIdentity = resolveUserIdentity(mainCharacterId, "story");
   const userName = userIdentity?.name ?? "用户";
-  const nameOf = (id: string): string => loadCharacters().find((c) => c.id === id)?.name || id;
-  const allNames = uniqueIds.map(nameOf);
+  const allCharacters = loadCharacters();
+  const cast = uniqueIds
+    .map((id) => allCharacters.find((item) => item.id === id))
+    .filter((character): character is Character => Boolean(character));
+  // 角色卡可能已被删除：凑不齐 2 位时退回单人链路，避免演出规则与实际角色不符
+  if (cast.length < 2) {
+    return generateStoryCompletion(mainCharacterId, history, options);
+  }
+  const allNames = cast.map((character) => character.name);
 
-  // 其余角色卡
-  const secondaryBlocks = uniqueIds.slice(1).map((id) => {
-    const character = loadCharacters().find((item) => item.id === id);
-    if (!character) return "";
+  // 名册字数预算：总预算约 6000 字符按人数均摊（50 人时每人约 120 字符兜底），避免提示词爆量
+  const perCharacterBudget = Math.max(120, Math.floor(6000 / cast.length));
+
+  // 其余角色卡（主角已走完整单人链路，此处只补其余角色）
+  const secondaryBlocks = cast.slice(1).map((character) => {
     const parts = [
       `## [Character: ${character.name}]`,
       `同时扮演 ${character.name}。`,
-      `人设：${character.persona || "（无）"}`,
+      `人设：${clipForPrompt(character.persona || "（无）", perCharacterBudget)}`,
     ];
-    if (character.personality?.trim()) parts.push(`性格：${character.personality}`);
+    if (character.personality?.trim()) parts.push(`性格：${clipForPrompt(character.personality, 160)}`);
     return parts.join("\n");
-  }).filter(Boolean);
+  });
 
   const multiRule = [
     `## [多人剧情规则]`,
-    `这是一场三人共同参与的剧情：用户（${userName}）、${allNames.join("、")}。`,
-    `你同时演绎以下全部角色，每个角色都要出场并彼此互动、与用户互动：${allNames.join("、")}。`,
-    `角色对白前用「${allNames.map((n) => `${n}：`).join("」「")}」标注说话者；其余为旁白与叙事。`,
-    `严格保持每个角色的人设、性格与说话风格始终一致，绝不让角色互相替代或混淆。`,
+    `这是一场 ${allNames.length + 1} 人共同参与的剧情：用户（${userName}）、${allNames.join("、")}。`,
+    `你同时演绎以上全部 ${allNames.length} 位角色，每位角色都要出场，彼此互动并与用户互动。`,
+    `角色对白前用「角色名：」标注说话者；其余为旁白与叙事。`,
+    `严格保持每个角色的人设、性格与说话风格始终一致，绝不让角色互相替代、串味或混淆（OOC）。`,
+    `各角色只知道自己该知道的信息，保留信息差，不要互相读心。`,
+    `不要代替「${userName}」说话或行动，把选择权留给用户。`,
   ].join("\n");
 
-  const inject = [...secondaryBlocks, multiRule].join("\n\n");
-  llmMessages.unshift({ role: "system", content: inject });
+  injectStoryCastBlock(llmMessages, [...secondaryBlocks, multiRule].join("\n\n"));
 
   const macroEngine = new MacroEngine(mainCharacter.name, userName);
   const rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, {

@@ -65,6 +65,7 @@ import {
   deleteStorySave,
   getStorySave,
   isMultiStorySession,
+  STORY_MAX_CAST_SIZE,
   type StoryMessage,
   type StorySession,
   updateStorySession,
@@ -296,6 +297,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [mode, setMode] = useState<"select" | "story">("select");
   const [multiMode, setMultiMode] = useState(false);
   const [multiPickIds, setMultiPickIds] = useState<string[]>([]);
+  const [multiPickHint, setMultiPickHint] = useState("");
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
@@ -407,11 +409,19 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function toggleMultiPick(characterId: string) {
-    setMultiPickIds((prev) => {
-      if (prev.includes(characterId)) return prev.filter((id) => id !== characterId);
-      if (prev.length >= 2) return prev; // 最多两个角色
-      return [...prev, characterId];
-    });
+    // 在 updater 之外判断，避免在 setState 回调里再触发 setState
+    if (multiPickIds.includes(characterId)) {
+      setMultiPickIds(multiPickIds.filter((id) => id !== characterId));
+      setMultiPickHint("");
+      return;
+    }
+    if (multiPickIds.length >= STORY_MAX_CAST_SIZE) {
+      // 到达上限：明确提示，避免用户以为点击失效
+      setMultiPickHint(`多人剧情最多 ${STORY_MAX_CAST_SIZE} 位角色`);
+      return;
+    }
+    setMultiPickIds([...multiPickIds, characterId]);
+    setMultiPickHint("");
   }
 
   useEffect(() => {
@@ -1054,12 +1064,14 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   >
                     <span className="story-select-mode-icon">👥</span>
                     <span className="story-select-mode-name">多人剧情</span>
-                    <span className="story-select-mode-desc">你与两位角色一起开始剧情</span>
+                    <span className="story-select-mode-desc">你与最多 {STORY_MAX_CAST_SIZE} 位角色同场演出</span>
                   </button>
                 </div>
 
                 <div className="story-select-hint">
-                  {multiMode ? "选择两位角色，与你共同开始剧情" : "选择一位角色，开始你们的剧情"}
+                  {multiMode
+                    ? `选择 2 ~ ${STORY_MAX_CAST_SIZE} 位角色，与你共同开始剧情`
+                    : "选择一位角色，开始你们的剧情"}
                 </div>
 
                 <div className="story-select-char-list">
@@ -1089,10 +1101,13 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 {multiMode && (
                   <div className="story-select-multi-actions">
                     <div className="story-select-multi-pick">
-                      已选：{multiPickIds.length === 0
+                      已选（{multiPickIds.length}/{STORY_MAX_CAST_SIZE}）：{multiPickIds.length === 0
                         ? "尚未选择"
                         : multiPickIds.map((id) => characters.find((c) => c.id === id)?.name || id).join("、")}
                     </div>
+                    {multiPickHint ? (
+                      <div className="story-select-hint" style={{ color: "var(--c-story-accent, #a2674a)" }}>{multiPickHint}</div>
+                    ) : null}
                     <button
                       type="button"
                       className="story-empty-action"
@@ -1109,16 +1124,19 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   <div className="story-select-continue">
                     <div className="story-drawer-eyebrow">继续之前的多剧情</div>
                     {multiSessions.map((session) => {
-                      const names = (session.characterIds || [])
-                        .map((id) => characters.find((c) => c.id === id)?.name || id)
-                        .join(" & ");
+                      const castIds = session.characterIds || [];
+                      const castNames = castIds.map((id) => characters.find((c) => c.id === id)?.name || id);
+                      // 阵容可能多达 50 人，列表里只展示前 3 位，避免名字串撑爆布局
+                      const names = castNames.length > 3
+                        ? `${castNames.slice(0, 3).join(" & ")} 等 ${castNames.length} 位`
+                        : castNames.join(" & ");
                       return (
                         <button
                           key={session.id}
                           type="button"
                           className="story-tool-btn"
                           style={{ marginBottom: 8, textAlign: "left", padding: "10px 14px", lineHeight: 1.5 }}
-                          onClick={() => enterMultiSession(session.characterIds || [])}
+                          onClick={() => enterMultiSession(castIds)}
                         >
                           {names}
                           <span style={{ display: "block", fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95,82,61,0.72))", marginTop: 2 }}>
@@ -1177,7 +1195,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 );
               })}
               <div style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-story-sub, rgba(95, 82, 61, 0.72))", lineHeight: 1.6 }}>
-                {storyDisplayNames} 与「{userIdentity?.name || "我"}」三人共同演绎。
+                {storyDisplayNames} 与「{userIdentity?.name || "我"}」共 {activeCharacterIds.length + 1} 人共同演绎。
               </div>
             </div>
           ) : (

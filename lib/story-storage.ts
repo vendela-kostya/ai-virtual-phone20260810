@@ -23,6 +23,9 @@ export type StorySession = {
   characterIds?: string[];
 };
 
+/** 多人剧情参演角色上限（用户 + 至多 50 位角色同场） */
+export const STORY_MAX_CAST_SIZE = 50;
+
 export type StoryMessageRole = "user" | "assistant" | "system";
 
 export type StoryMessage = {
@@ -215,9 +218,15 @@ export function createOrGetStorySession(characterId: string): StorySession {
   return session;
 }
 
-/** 创建或获取多人剧情会话：同一组角色共用一份会话（含用户共三人参与） */
+/** 归一化多人参演角色：去空、去重，并截断到 STORY_MAX_CAST_SIZE 上限 */
+export function normalizeMultiCastIds(characterIds: string[]): string[] {
+  return Array.from(new Set((characterIds || []).map((id) => id?.trim()).filter(Boolean)))
+    .slice(0, STORY_MAX_CAST_SIZE);
+}
+
+/** 创建或获取多人剧情会话：同一组角色共用一份会话（角色组合相同即复用） */
 export function createOrGetMultiStorySession(characterIds: string[]): StorySession {
-  const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)));
+  const uniqueIds = normalizeMultiCastIds(characterIds);
   if (uniqueIds.length < 2) {
     // 参数不足时退化为单人会话
     return createOrGetStorySession(uniqueIds[0] || "");

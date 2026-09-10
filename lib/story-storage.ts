@@ -19,6 +19,8 @@ export type StorySession = {
   uiPrefs?: StoryUiPrefs;
   lastMessageId?: string;
   lastMessagePreview?: string;
+  /** 多人剧情：参与角色 id 列表（≥2 时视为多人会话）。characterId 仍存主角色 id。 */
+  characterIds?: string[];
 };
 
 export type StoryMessageRole = "user" | "assistant" | "system";
@@ -41,15 +43,40 @@ export type StoryProjectionEntry = {
   content: string;
 };
 
+/** 存档时一并快照的会话配置，读档时整体恢复，保证存档独立完整 */
+export type StorySaveSnapshot = {
+  foldTags?: string;
+  contextExcludedTags?: string;
+  customCSS?: string;
+  uiPrefs?: StoryUiPrefs;
+};
+
+/** 一份剧情存档：某时刻的完整消息快照 + 会话配置快照 */
+export type StorySave = {
+  id: string;
+  sessionId: string;
+  name: string;
+  createdAt: string;
+  messageCount: number;
+  messages: StoryMessage[];
+  sessionSnapshot?: StorySaveSnapshot;
+};
+
 class StoryDatabase extends Dexie {
   sessions!: Dexie.Table<StorySession, string>;
   messages!: Dexie.Table<StoryMessage, string>;
+  saves!: Dexie.Table<StorySave, string>;
 
   constructor() {
     super("AiPhoneStoryDB");
     this.version(1).stores({
       sessions: "id, characterId, updatedAt",
       messages: "id, sessionId, createdAt",
+    });
+    this.version(2).stores({
+      sessions: "id, characterId, updatedAt",
+      messages: "id, sessionId, createdAt",
+      saves: "id, sessionId, createdAt",
     });
   }
 }
@@ -59,6 +86,7 @@ const storyDb = new StoryDatabase();
 let _hydrated = false;
 let _sessionsCache: StorySession[] = [];
 let _messagesCache: StoryMessage[] = [];
+let _savesCache: StorySave[] = [];
 
 function generateId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -87,6 +115,15 @@ function isPreferredStorySession(candidate: StorySession, current: StorySession)
   return candidate.id.localeCompare(current.id) > 0;
 }
 
+function getMultiSessionKey(characterIds: string[]): string {
+  return `multi:${[...new Set(characterIds)].sort().join(",")}`;
+}
+
+/** 判断会话是否为多人剧情（参与角色 ≥2） */
+export function isMultiStorySession(session: StorySession | null | undefined): boolean {
+  return Boolean(session && Array.isArray(session.characterIds) && session.characterIds.length >= 2);
+}
+
 function normalizeStorySessions(sessions: StorySession[]): { items: StorySession[]; changed: boolean } {
   const normalized: StorySession[] = [];
   const indexByCharacter = new Map<string, number>();
@@ -102,9 +139,13 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
     const item = id === session.id && characterId === session.characterId
       ? session
       : { ...session, id, characterId };
-    const existingIndex = indexByCharacter.get(characterId);
+    // 多人会话用角色组合作为去重 key，与单人会话语义隔离，互不顶替
+    const dedupeKey = isMultiStorySession(item)
+      ? getMultiSessionKey(item.characterIds || [])
+      : characterId;
+    const existingIndex = indexByCharacter.get(dedupeKey);
     if (existingIndex === undefined) {
-      indexByCharacter.set(characterId, normalized.length);
+      indexByCharacter.set(dedupeKey, normalized.length);
       normalized.push(item);
       if (item !== session) changed = true;
       continue;
@@ -128,11 +169,13 @@ function persistStorySessionsSnapshot(sessions: StorySession[]): void {
 
 export async function hydrateStoryStorage(): Promise<void> {
   if (_hydrated || typeof window === "undefined") return;
-  const [sessions, messages] = await Promise.all([
+  const [sessions, messages, saves] = await Promise.all([
     storyDb.sessions.toArray().catch(() => []),
     storyDb.messages.toArray().catch(() => []),
+    storyDb.saves.toArray().catch(() => []),
   ]);
   _messagesCache = messages;
+  _savesCache = saves;
   const normalized = normalizeStorySessions(sessions);
   _sessionsCache = normalized.items;
   if (normalized.changed) persistStorySessionsSnapshot(normalized.items);
@@ -158,7 +201,7 @@ export function createOrGetStorySession(characterId: string): StorySession {
     _sessionsCache = normalized.items;
     persistStorySessionsSnapshot(normalized.items);
   }
-  const existing = _sessionsCache.find((session) => session.characterId === characterId);
+  const existing = _sessionsCache.find((session) => !isMultiStorySession(session) && session.characterId === characterId);
   if (existing) return existing;
 
   const session: StorySession = {
@@ -170,6 +213,39 @@ export function createOrGetStorySession(characterId: string): StorySession {
   _sessionsCache.unshift(session);
   storyDb.sessions.put(session).catch(() => undefined);
   return session;
+}
+
+/** 创建或获取多人剧情会话：同一组角色共用一份会话（含用户共三人参与） */
+export function createOrGetMultiStorySession(characterIds: string[]): StorySession {
+  const uniqueIds = Array.from(new Set(characterIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueIds.length < 2) {
+    // 参数不足时退化为单人会话
+    return createOrGetStorySession(uniqueIds[0] || "");
+  }
+  const normalized = normalizeStorySessions(_sessionsCache);
+  if (normalized.changed) {
+    _sessionsCache = normalized.items;
+    persistStorySessionsSnapshot(normalized.items);
+  }
+  const key = getMultiSessionKey(uniqueIds);
+  const existing = _sessionsCache.find((session) => isMultiStorySession(session) && getMultiSessionKey(session.characterIds || []) === key);
+  if (existing) return existing;
+
+  const session: StorySession = {
+    id: generateId("story_sess"),
+    characterId: uniqueIds[0],
+    characterIds: uniqueIds,
+    updatedAt: new Date().toISOString(),
+    uiPrefs: {},
+  };
+  _sessionsCache.unshift(session);
+  storyDb.sessions.put(session).catch(() => undefined);
+  return session;
+}
+
+/** 列出所有多人剧情会话（含角色组合与最后预览） */
+export function listMultiStorySessions(): StorySession[] {
+  return loadStorySessions().filter(isMultiStorySession);
 }
 
 export function updateStorySession(sessionId: string, updates: Partial<StorySession>): StorySession | null {
@@ -262,7 +338,7 @@ export function loadStoryProjectionEntries(
   characterId: string,
   options?: { afterTimestamp?: string; userName?: string; charName?: string }
 ): StoryProjectionEntry[] {
-  const session = _sessionsCache.find((item) => item.characterId === characterId);
+  const session = _sessionsCache.find((item) => !isMultiStorySession(item) && item.characterId === characterId);
   if (!session) return [];
   const messages = loadStoryMessages(session.id);
   const projections: StoryProjectionEntry[] = [];
@@ -285,4 +361,46 @@ export function loadStoryProjectionEntries(
   }
 
   return projections;
+}
+
+// ── 剧情存档（每份存档是独立完整快照，互不影响） ──
+
+export function listStorySaves(sessionId: string): StorySave[] {
+  return _savesCache
+    .filter((save) => save.sessionId === sessionId)
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+}
+
+export function getStorySave(saveId: string): StorySave | undefined {
+  return _savesCache.find((save) => save.id === saveId);
+}
+
+export function createStorySave(
+  sessionId: string,
+  name: string,
+  messages: StoryMessage[],
+  sessionSnapshot?: StorySaveSnapshot
+): StorySave {
+  const save: StorySave = {
+    id: generateId("story_save"),
+    sessionId,
+    name: name.trim() || "未命名存档",
+    createdAt: new Date().toISOString(),
+    messageCount: messages.length,
+    messages: messages.map((message) => ({ ...message })),
+    sessionSnapshot: sessionSnapshot
+      ? {
+          ...sessionSnapshot,
+          uiPrefs: sessionSnapshot.uiPrefs ? { ...sessionSnapshot.uiPrefs } : undefined,
+        }
+      : undefined,
+  };
+  _savesCache.unshift(save);
+  storyDb.saves.put(save).catch(() => undefined);
+  return save;
+}
+
+export function deleteStorySave(saveId: string): void {
+  _savesCache = _savesCache.filter((save) => save.id !== saveId);
+  storyDb.saves.delete(saveId).catch(() => undefined);
 }

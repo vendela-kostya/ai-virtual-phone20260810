@@ -62,6 +62,8 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "chat-generating:",
           "pending_reply_",
           "ai_phone_chat_offline_turns:",
+          // 线下存档清单（archiveId → 名称/统计）；轮次仍走上面的 turns 前缀
+          "ai_phone_chat_offline_archives:",
           "chat-offline-mode:",
           "chat-theater-mode:",
           "chat_plugin_data_v1:",

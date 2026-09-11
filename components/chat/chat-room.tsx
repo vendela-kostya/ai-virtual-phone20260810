@@ -45,7 +45,8 @@ import { ConfirmDialog } from "@/components/ui/modal";
 import { deleteWeixinCloudMessagesFromCloud, emitWeixinSyncToast, syncAllWeixinBotRuntimesToCloud } from "@/lib/weixin-cloud-sync";
 import { loadBindingConfig, loadPresets, loadRegexes, resolveBinding, resolveUserIdentity } from "@/lib/settings-storage";
 import { generateGroupChatCompletion, generateGroupOfflineChatCompletion, parseGroupChatResponse, buildEditableGroupRoundText } from "@/lib/group-chat-engine";
-import { appendChatOfflineTurn, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, loadChatOfflineTurns, parseOfflineResponse, saveChatOfflineTurns, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
+import { appendChatOfflineTurn, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, getChatOfflineArchive, loadChatOfflineTurns, parseOfflineResponse, saveChatOfflineTurns, syncChatOfflineArchiveStats, touchChatOfflineArchive, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
+import { CHAT_OPEN_OFFLINE_SAVES_EVENT, ChatOfflineSavePicker } from "./chat-offline-save-picker";
 import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
 import { scheduleFollowUp, cancelFollowUp, cancelBackgroundGeneration, isBackgroundReplyGenerating } from "@/lib/follow-up-service";
 import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismiss-auto-send";
@@ -1090,6 +1091,11 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const [offlineMode, setOfflineMode] = useState(false);
     const [theaterMode, setTheaterMode] = useState(() => kvGet(CHAT_THEATER_MODE_PREFIX + session.id) === "1");
     const [offlineTurns, setOfflineTurns] = useState<ChatOfflineTurn[]>([]);
+    // 当前线下存档：null 表示还没选过（读取一律回退到 session.id，即老数据所在的「默认存档」）
+    const [offlineArchiveId, setOfflineArchiveId] = useState<string | null>(null);
+    const [offlineArchiveName, setOfflineArchiveName] = useState("");
+    // 进入线下前的存档选择器（选择存档 / 新增存档）
+    const [showOfflineArchivePicker, setShowOfflineArchivePicker] = useState(false);
     const [offlineVisibleCount, setOfflineVisibleCount] = useState(OFFLINE_INITIAL_LOAD);
     const [pendingOfflineUserText, setPendingOfflineUserText] = useState("");
     const [isOfflineGenerating, setIsOfflineGenerating] = useState(false);
@@ -4092,29 +4098,93 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setEditingOfflineContent(role === "user" ? turn.userContent : formatOfflineTurnXml(turn));
     };
 
-    const toggleOfflineMode = () => {
-        if (!offlineMode && isGenerating) {
-            showChatToast("请先等待对方回复");
-            return;
-        }
-        if (offlineMode && isOfflineGenerating) {
-            showChatToast("线下回复生成中");
-            return;
-        }
-        cancelFollowUp(session.id);
+    /** 当前线下存档 id：没选过存档时回退到会话 id，等价于老数据的「默认存档」 */
+    const activeOfflineArchiveId = offlineArchiveId || session.id;
+
+    const closeOfflinePanels = () => {
         setShowPlusMenu(false);
         setShowEmojiPanel(false);
         setShowStickerPanel(false);
         setRichModal(null);
         setQuotingMessage(null);
         setActiveOfflineTarget(null);
-        setOfflineTurns(loadChatOfflineTurns(session.id));
+    };
+
+    /** 带着某份存档进入线下：存档名、轮次、可见窗口一次性对齐 */
+    const enterOfflineMode = (archiveId: string) => {
+        const targetId = archiveId || session.id;
+        const archive = getChatOfflineArchive(session.id, targetId);
+        cancelFollowUp(session.id);
+        closeOfflinePanels();
+        setShowOfflineArchivePicker(false);
+        setOfflineArchiveId(targetId);
+        setOfflineArchiveName(archive?.name || "");
+        setOfflineTurns(loadChatOfflineTurns(targetId));
         setOfflineVisibleCount(OFFLINE_INITIAL_LOAD);
-        setOfflineMode(prev => {
-            const next = !prev;
-            kvSet(CHAT_OFFLINE_MODE_PREFIX + session.id, next ? "1" : "0");
-            return next;
-        });
+        setOfflineMode(true);
+        kvSet(CHAT_OFFLINE_MODE_PREFIX + session.id, "1");
+        touchChatOfflineArchive(session.id, targetId);
+    };
+
+    /** 存档清单变化后刷新当前存档名；当前存档被删则退出线下，避免写进已删档 */
+    const handleOfflineArchivesChanged = () => {
+        if (!offlineArchiveId) return;
+        const archive = getChatOfflineArchive(session.id, offlineArchiveId);
+        if (archive) {
+            setOfflineArchiveName(archive.name);
+            return;
+        }
+        setOfflineArchiveId(null);
+        setOfflineArchiveName("");
+        setOfflineTurns([]);
+        setOfflineMode(false);
+        kvSet(CHAT_OFFLINE_MODE_PREFIX + session.id, "0");
+        showChatToast("当前线下存档已删除");
+    };
+
+    const openOfflineArchivePicker = () => {
+        if (isOfflineGenerating) {
+            showChatToast("线下回复生成中");
+            return;
+        }
+        setShowPlusMenu(false);
+        setShowEmojiPanel(false);
+        setShowStickerPanel(false);
+        setShowOfflineArchivePicker(true);
+    };
+
+    // 聊天信息页的「线下存档」入口：关掉设置页后由本聊天室弹出选择器
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
+            if (detail?.sessionId && detail.sessionId !== session.id) return;
+            setShowSettings(false);
+            openOfflineArchivePicker();
+        };
+        window.addEventListener(CHAT_OPEN_OFFLINE_SAVES_EVENT, handler);
+        return () => window.removeEventListener(CHAT_OPEN_OFFLINE_SAVES_EVENT, handler);
+    }, [session.id]);
+
+    // 线下入口：先选存档再开始线下（聊天 → 线下功能 → 选择/新增存档 → 开始线下）
+    const toggleOfflineMode = () => {
+        if (offlineMode) {
+            if (isOfflineGenerating) {
+                showChatToast("线下回复生成中");
+                return;
+            }
+            cancelFollowUp(session.id);
+            closeOfflinePanels();
+            setOfflineMode(false);
+            kvSet(CHAT_OFFLINE_MODE_PREFIX + session.id, "0");
+            return;
+        }
+        if (isGenerating) {
+            showChatToast("请先等待对方回复");
+            return;
+        }
+        cancelFollowUp(session.id);
+        closeOfflinePanels();
+        setShowOfflineArchivePicker(true);
     };
 
     const toggleTheaterMode = () => {
@@ -4190,6 +4260,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 if (!result.summary.trim()) showChatToast(`未提取到 <${result.summaryTag}> 摘要`);
                 const saved = appendChatOfflineTurn({
                     sessionId: session.id,
+                    archiveId: activeOfflineArchiveId,
                     userContent: currentText,
                     assistantContent,
                     summary: result.summary.trim(),
@@ -4232,7 +4303,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
         if (editingOfflineTarget.role === "user") {
             const nextContent = applyEditTextRegex(content, 1, true);
-            const updated = updateChatOfflineTurn(session.id, turn.id, { userContent: nextContent });
+            const updated = updateChatOfflineTurn(activeOfflineArchiveId, turn.id, { userContent: nextContent }, { sessionId: session.id });
             if (updated) setOfflineTurns(prev => prev.map(item => item.id === updated.id ? updated : item));
             setEditingOfflineTarget(null);
             setEditingOfflineContent("");
@@ -4252,26 +4323,26 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         const editedThinking = turn.thinkingText !== undefined
             ? (extractThinkingTag(nextContent, turn.thinkingTag) || undefined)
             : undefined;
-        const updated = updateChatOfflineTurn(session.id, turn.id, {
+        const updated = updateChatOfflineTurn(activeOfflineArchiveId, turn.id, {
             assistantContent,
             summary: parsed.summary.trim(),
             summaryTag: parsed.summaryTag,
             rawText: parsed.rawText,
             thinkingText: editedThinking,
             thinkingTag: editedThinking !== undefined ? turn.thinkingTag : undefined,
-        });
+        }, { sessionId: session.id });
         if (updated) setOfflineTurns(prev => prev.map(item => item.id === updated.id ? updated : item));
         setEditingOfflineTarget(null);
         setEditingOfflineContent("");
     };
 
     const handleOfflineDeleteTurn = (turnId: string) => {
-        setOfflineTurns(deleteChatOfflineTurn(session.id, turnId));
+        setOfflineTurns(deleteChatOfflineTurn(activeOfflineArchiveId, turnId, { sessionId: session.id }));
         setActiveOfflineTarget(null);
     };
 
     const handleOfflineDeleteTurnsFrom = (turnId: string) => {
-        setOfflineTurns(deleteChatOfflineTurnsFrom(session.id, turnId));
+        setOfflineTurns(deleteChatOfflineTurnsFrom(activeOfflineArchiveId, turnId, { sessionId: session.id }));
         setActiveOfflineTarget(null);
     };
 
@@ -4296,7 +4367,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setShowEmojiPanel(false);
         setShowStickerPanel(false);
         setRichModal(null);
-        saveChatOfflineTurns(session.id, baseTurns);
+        saveChatOfflineTurns(activeOfflineArchiveId, baseTurns);
+        syncChatOfflineArchiveStats(session.id, activeOfflineArchiveId);
         setOfflineTurns(baseTurns);
         setPendingOfflineUserText(retryInput);
         offlineGenerationInputRef.current = retryInput;
@@ -4340,6 +4412,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             if (!result.summary.trim()) showChatToast(`未提取到 <${result.summaryTag}> 摘要`);
             const saved = appendChatOfflineTurn({
                 sessionId: session.id,
+                archiveId: activeOfflineArchiveId,
                 userContent: retryInput,
                 assistantContent,
                 summary: result.summary.trim(),
@@ -5444,7 +5517,16 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         <ChevronLeft size={24} strokeWidth={1.5} />
                     </button>
                     <span className="page-title" style={{ position: 'relative' }}>
-                        {offlineMode ? "线下 · " : ""}
+                        {offlineMode ? (
+                            <button
+                                type="button"
+                                onClick={openOfflineArchivePicker}
+                                title="切换线下存档"
+                                style={{ font: "inherit", color: "inherit", background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                            >
+                                {`线下${offlineArchiveName ? ` · ${offlineArchiveName}` : ""} · `}
+                            </button>
+                        ) : ""}
                         {session.isGroup
                             ? `${session.groupName || "群聊"}(${(session.participantIds?.length || 0) + (session.isSpectator ? 0 : 1)})`
                             : (session.alias || character?.name || `User_${session.contactId.slice(-4)}`)}
@@ -5483,6 +5565,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             >
                 {offlineMode && (
                     <div className="chat-offline-body">
+                        <div className="flex items-center justify-center gap-2">
+                            <span className="chat-sys-msg">
+                                {`线下存档：${offlineArchiveName || "默认存档"}`}
+                            </span>
+                            <button
+                                type="button"
+                                className="chat-sys-msg"
+                                style={{ cursor: "pointer" }}
+                                onClick={openOfflineArchivePicker}
+                            >切换/新增存档</button>
+                        </div>
                         {offlineTurns.length === 0 && !pendingOfflineUserText ? (
                             <div className="chat-offline-empty">
                                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0Z" /><circle cx="12" cy="10" r="3" /></svg>
@@ -6584,6 +6677,19 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         setMessages(prev => [...prev, sysMsg]);
                     }}
                     onClose={() => setMediaDetailMsg(null)}
+                />
+            )}
+
+            {showOfflineArchivePicker && (
+                <ChatOfflineSavePicker
+                    sessionId={session.id}
+                    sessionTitle={session.isGroup
+                        ? (session.groupName || "群聊")
+                        : (session.alias || character?.name || "")}
+                    activeArchiveId={offlineMode ? activeOfflineArchiveId : null}
+                    onClose={() => setShowOfflineArchivePicker(false)}
+                    onSelect={(archiveId) => enterOfflineMode(archiveId)}
+                    onChanged={handleOfflineArchivesChanged}
                 />
             )}
 

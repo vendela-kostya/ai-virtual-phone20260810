@@ -4,7 +4,7 @@
 // 单独成文件是因为 chat-storage 不能反向依赖 chat-offline-storage / follow-up-service。
 
 import { deleteChatSession } from "./chat-storage";
-import { clearChatOfflineTurns } from "./chat-offline-storage";
+import { clearChatOfflineArchives } from "./chat-offline-storage";
 import { cancelBackgroundGeneration, cancelFollowUp } from "./follow-up-service";
 import { clearTimedWakeSchedule } from "./timed-wake-storage";
 import { saveStatusRegionConfig } from "./chat-status-region";
@@ -23,9 +23,9 @@ export function removeChatSessionCompletely(sessionId: string): void {
     cancelFollowUp(sessionId);
     clearTimedWakeSchedule(sessionId);
 
-    // 会话本体 + 线上消息 + 线下记录
+    // 会话本体 + 线上消息 + 线下记录（含该会话名下所有线下存档）
     deleteChatSession(sessionId);
-    clearChatOfflineTurns(sessionId);
+    clearChatOfflineArchives(sessionId);
 
     // 按 sessionId 存的零散开关
     kvRemove(GENERATING_PREFIX + sessionId);

@@ -32,7 +32,8 @@ import {
     pruneExpiredGroupMutes,
     type GroupAdminAction,
 } from "@/lib/group-admin";
-import { clearChatOfflineTurns } from "@/lib/chat-offline-storage";
+import { clearChatOfflineArchives } from "@/lib/chat-offline-storage";
+import { CHAT_OPEN_OFFLINE_SAVES_EVENT } from "./chat-offline-save-picker";
 import { removeChatSessionCompletely } from "@/lib/chat-session-remove";
 import { triggerDeleteFriendReaction } from "@/lib/friend-request-engine";
 import { loadCharacters } from "@/lib/character-storage";
@@ -638,7 +639,8 @@ export function ChatSettingsPanel({
 
     const handleClearOfflineHistory = () => {
         if (offlineHistoryBusy) return;
-        clearChatOfflineTurns(session.id);
+        // 线下存档上线后，一个会话可能有多份存档：清空即全部存档一并清掉
+        clearChatOfflineArchives(session.id);
         onOfflineHistoryCleared?.();
         setShowConfirmClearOffline(false);
     };
@@ -1092,6 +1094,29 @@ export function ChatSettingsPanel({
                                 />
                             </div>
                         </div>
+                        <button
+                            className="menu-item"
+                            disabled={offlineHistoryBusy}
+                            onClick={() => {
+                                if (offlineHistoryBusy) return;
+                                onClose();
+                                window.dispatchEvent(new CustomEvent(CHAT_OPEN_OFFLINE_SAVES_EVENT, {
+                                    detail: { sessionId: session.id },
+                                }));
+                            }}
+                            style={offlineHistoryBusy ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+                        >
+                            <ChatInfoIcon icon={FolderOpen} color={BINDING_ACCENTS.preset} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">线下存档</span>
+                                <span className="menu-desc">
+                                    {offlineHistoryBusy
+                                        ? "线下回复生成中，完成后再切换"
+                                        : "选择 / 新增 / 删除存档，进入线下前先选一份"}
+                                </span>
+                            </div>
+                            <div className="menu-right"><ChevronRight size={16} /></div>
+                        </button>
                         <div className="menu-item">
                             <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.api} />
                             <div className="menu-label-group">

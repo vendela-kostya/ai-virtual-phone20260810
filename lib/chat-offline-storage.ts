@@ -39,7 +39,9 @@ export type ChatOfflineArchive = {
     preview: string;
 };
 
-export const DEFAULT_CHAT_OFFLINE_ARCHIVE_NAME = "默认存档";
+/** 自动登记出来的存档名：它装着「升级前就存在、还没被登记过的线下记录」，
+ *  名字直说内容，避免用户误以为这些内容丢了。 */
+export const DEFAULT_CHAT_OFFLINE_ARCHIVE_NAME = "已有内容";
 
 export type ChatOfflineProjectionEntry = {
     id: string;
@@ -164,10 +166,16 @@ function writeArchives(sessionId: string, archives: ChatOfflineArchive[]): void 
     kvSet(archivesKey(sessionId), JSON.stringify(archives));
 }
 
+/** 排序键：有内容的按「最后一条轮次」排（谁的内容新谁在前），
+ *  还没内容的按创建/使用时间排——刚新建的空档也停在前排，不会沉底。 */
+function archiveSortKey(archive: ChatOfflineArchive): string {
+    return archive.lastTurnAt || archive.lastUsedAt || archive.createdAt || "";
+}
+
 function sortArchives(archives: ChatOfflineArchive[]): ChatOfflineArchive[] {
     return [...archives].sort((a, b) => {
-        const byUsed = (b.lastUsedAt || "").localeCompare(a.lastUsedAt || "");
-        if (byUsed !== 0) return byUsed;
+        const byContent = archiveSortKey(b).localeCompare(archiveSortKey(a));
+        if (byContent !== 0) return byContent;
         return (b.createdAt || "").localeCompare(a.createdAt || "");
     });
 }
@@ -189,18 +197,40 @@ function createDefaultArchive(sessionId: string, turns: ChatOfflineTurn[]): Chat
     };
 }
 
-/** 存档清单（最近使用在前）。首次调用时会把「还没有存档登记的旧线下记录」
- *  就地登记成默认存档，老数据不会因为升级而消失。 */
+/** 补登记：轮次键（会话 id）下还有内容、但清单里没有对应条目时，补一条「已有内容」存档。
+ *
+ *  这里刻意**不看清单是否为空**：早先的版本只在清单为空时登记，于是用户一旦先
+ *  「新增存档」，清单不再为空，老记录就永远进不了列表——内容还在存储里，界面上
+ *  却像凭空消失（这是个已修复的坑，别再退回「空清单才登记」的写法）。 */
+function registerLegacyArchiveIfNeeded(sessionId: string): ChatOfflineArchive[] {
+    const archives = readArchives(sessionId);
+    if (archives.some(archive => archive.id === sessionId)) return archives;
+    const legacyTurns = loadChatOfflineTurns(sessionId);
+    if (legacyTurns.length === 0) return archives;
+    const next = [...archives, createDefaultArchive(sessionId, legacyTurns)];
+    writeArchives(sessionId, next);
+    return next;
+}
+
+/** 存档清单（最近使用在前），必要时就地登记「已有内容」存档。 */
 export function loadChatOfflineArchives(sessionId: string): ChatOfflineArchive[] {
-    let archives = readArchives(sessionId);
-    if (archives.length === 0) {
-        const legacyTurns = loadChatOfflineTurns(sessionId);
-        if (legacyTurns.length > 0) {
-            archives = [createDefaultArchive(sessionId, legacyTurns)];
-            writeArchives(sessionId, archives);
-        }
-    }
-    return sortArchives(archives);
+    return sortArchives(registerLegacyArchiveIfNeeded(sessionId));
+}
+
+/** 自动续档用：挑一份「装着上次生成内容」的存档。
+ *  先按最后一条轮次的时间取最新的有内容存档（回档后接着上次剧情写）；
+ *  全都还没内容时才退回最近使用的那份。没有存档则返回 null。 */
+export function getLatestChatOfflineArchive(sessionId: string): ChatOfflineArchive | null {
+    const archives = loadChatOfflineArchives(sessionId);
+    if (archives.length === 0) return null;
+    const withTurns = archives.filter(archive => archive.turnCount > 0);
+    if (withTurns.length === 0) return archives[0];
+    return [...withTurns].sort((a, b) => {
+        const at = a.lastTurnAt || a.updatedAt || a.createdAt || "";
+        const bt = b.lastTurnAt || b.updatedAt || b.createdAt || "";
+        if (at !== bt) return bt.localeCompare(at);
+        return (b.lastUsedAt || "").localeCompare(a.lastUsedAt || "");
+    })[0];
 }
 
 export function getChatOfflineArchive(sessionId: string, archiveId: string): ChatOfflineArchive | null {
@@ -218,7 +248,13 @@ export function clearChatOfflineArchives(sessionId: string): void {
     lastTurnCache.delete(sessionId);
 }
 
-export function createChatOfflineArchive(sessionId: string, name?: string): ChatOfflineArchive {
+/** 新建存档。options.copyFromArchiveId 给出源存档时，把它的轮次整份复制进来
+ *  ——即「把现有内容存进新存档」，用户不必担心新档是一片空白、旧内容无处安放。 */
+export function createChatOfflineArchive(
+    sessionId: string,
+    name?: string,
+    options?: { copyFromArchiveId?: string },
+): ChatOfflineArchive {
     const archives = loadChatOfflineArchives(sessionId);
     const now = new Date().toISOString();
     const archive: ChatOfflineArchive = {
@@ -231,6 +267,22 @@ export function createChatOfflineArchive(sessionId: string, name?: string): Chat
         turnCount: 0,
         preview: "",
     };
+
+    const sourceId = options?.copyFromArchiveId?.trim();
+    if (sourceId) {
+        const sourceTurns = loadChatOfflineTurns(sourceId);
+        if (sourceTurns.length > 0) {
+            // id 必须重造：存档之间轮次各自独立，共用 id 会让「删除某一轮」误伤另一份
+            saveChatOfflineTurns(archive.id, sourceTurns.map(turn => ({ ...turn, id: createTurnId() })));
+            const copied = loadChatOfflineTurns(archive.id);
+            const lastTurn = copied[copied.length - 1];
+            archive.turnCount = copied.length;
+            archive.updatedAt = lastTurn?.createdAt || now;
+            archive.lastTurnAt = lastTurn?.createdAt;
+            archive.preview = turnPreviewText(lastTurn);
+        }
+    }
+
     writeArchives(sessionId, [...archives, archive]);
     return archive;
 }
@@ -238,7 +290,7 @@ export function createChatOfflineArchive(sessionId: string, name?: string): Chat
 export function renameChatOfflineArchive(sessionId: string, archiveId: string, name: string): ChatOfflineArchive | null {
     const nextName = name.trim();
     if (!nextName) return null;
-    const archives = readArchives(sessionId);
+    const archives = loadChatOfflineArchives(sessionId);
     const index = archives.findIndex(archive => archive.id === archiveId);
     if (index < 0) return null;
     archives[index] = { ...archives[index], name: nextName };
@@ -247,16 +299,17 @@ export function renameChatOfflineArchive(sessionId: string, archiveId: string, n
 }
 
 export function deleteChatOfflineArchive(sessionId: string, archiveId: string): ChatOfflineArchive[] {
-    const next = readArchives(sessionId).filter(archive => archive.id !== archiveId);
+    const next = loadChatOfflineArchives(sessionId).filter(archive => archive.id !== archiveId);
     writeArchives(sessionId, next);
     clearChatOfflineTurns(archiveId);
     return sortArchives(next);
 }
 
-/** 进入存档时调用：刷新「最近使用」，存档列表顺序跟着走。 */
+/** 进入存档时调用：刷新「最近使用」，存档列表顺序跟着走。
+ *  走 loadChatOfflineArchives 而非 readArchives——「已有内容」存档可能此刻才补登记。 */
 export function touchChatOfflineArchive(sessionId: string, archiveId: string): void {
     if (!sessionId || !archiveId) return;
-    const archives = readArchives(sessionId);
+    const archives = loadChatOfflineArchives(sessionId);
     const index = archives.findIndex(archive => archive.id === archiveId);
     if (index < 0) return;
     archives[index] = { ...archives[index], lastUsedAt: new Date().toISOString() };
@@ -267,7 +320,8 @@ export function touchChatOfflineArchive(sessionId: string, archiveId: string): v
  *  整体覆盖写入（如「重试以下」截断）后需要手动调一次。 */
 export function syncChatOfflineArchiveStats(sessionId: string | undefined, archiveId: string): void {
     if (!sessionId) return;
-    const archives = readArchives(sessionId);
+    // 同样走 loadChatOfflineArchives：首次写入「已有内容」存档时条目可能还没登记
+    const archives = loadChatOfflineArchives(sessionId);
     const index = archives.findIndex(archive => archive.id === archiveId);
     if (index < 0) return;
     const turns = loadChatOfflineTurns(archiveId);

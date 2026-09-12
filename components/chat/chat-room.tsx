@@ -45,7 +45,7 @@ import { ConfirmDialog } from "@/components/ui/modal";
 import { deleteWeixinCloudMessagesFromCloud, emitWeixinSyncToast, syncAllWeixinBotRuntimesToCloud } from "@/lib/weixin-cloud-sync";
 import { loadBindingConfig, loadPresets, loadRegexes, resolveBinding, resolveUserIdentity } from "@/lib/settings-storage";
 import { generateGroupChatCompletion, generateGroupOfflineChatCompletion, parseGroupChatResponse, buildEditableGroupRoundText } from "@/lib/group-chat-engine";
-import { appendChatOfflineTurn, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, getChatOfflineArchive, loadChatOfflineTurns, parseOfflineResponse, saveChatOfflineTurns, syncChatOfflineArchiveStats, touchChatOfflineArchive, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
+import { DEFAULT_CHAT_OFFLINE_ARCHIVE_NAME, appendChatOfflineTurn, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, getChatOfflineArchive, getLatestChatOfflineArchive, loadChatOfflineTurns, parseOfflineResponse, saveChatOfflineTurns, syncChatOfflineArchiveStats, touchChatOfflineArchive, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
 import { CHAT_OPEN_OFFLINE_SAVES_EVENT, ChatOfflineSavePicker } from "./chat-offline-save-picker";
 import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
 import { scheduleFollowUp, cancelFollowUp, cancelBackgroundGeneration, isBackgroundReplyGenerating } from "@/lib/follow-up-service";
@@ -4110,20 +4110,27 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setActiveOfflineTarget(null);
     };
 
-    /** 带着某份存档进入线下：存档名、轮次、可见窗口一次性对齐 */
+    /** 带着某份存档进入线下：存档名、轮次、可见窗口一次性对齐。
+     *  进入即载入该存档已有的轮次，并报一次「已自动保存 N 轮」——
+     *  用户看不到内容时会以为是没保存，明确回执能消除这种误会。 */
     const enterOfflineMode = (archiveId: string) => {
         const targetId = archiveId || session.id;
         const archive = getChatOfflineArchive(session.id, targetId);
+        const turns = loadChatOfflineTurns(targetId);
         cancelFollowUp(session.id);
         closeOfflinePanels();
         setShowOfflineArchivePicker(false);
         setOfflineArchiveId(targetId);
         setOfflineArchiveName(archive?.name || "");
-        setOfflineTurns(loadChatOfflineTurns(targetId));
+        setOfflineTurns(turns);
         setOfflineVisibleCount(OFFLINE_INITIAL_LOAD);
         setOfflineMode(true);
         kvSet(CHAT_OFFLINE_MODE_PREFIX + session.id, "1");
         touchChatOfflineArchive(session.id, targetId);
+        const label = archive?.name || DEFAULT_CHAT_OFFLINE_ARCHIVE_NAME;
+        showChatToast(turns.length > 0
+            ? `已回到「${label}」· 已自动保存 ${turns.length} 轮`
+            : `已进入「${label}」`);
     };
 
     /** 存档清单变化后刷新当前存档名；当前存档被删则退出线下，避免写进已删档 */
@@ -4184,6 +4191,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         }
         cancelFollowUp(session.id);
         closeOfflinePanels();
+        // 直接接着「装着上次生成内容」的那份存档，进线下就能看到上次的内容；
+        // 只有一份内容都没有时，才让用户先选/新建存档。
+        const latest = getLatestChatOfflineArchive(session.id);
+        if (latest && latest.turnCount > 0) {
+            enterOfflineMode(latest.id);
+            return;
+        }
         setShowOfflineArchivePicker(true);
     };
 
@@ -5524,7 +5538,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                 title="切换线下存档"
                                 style={{ font: "inherit", color: "inherit", background: "none", border: "none", padding: 0, cursor: "pointer" }}
                             >
-                                {`线下${offlineArchiveName ? ` · ${offlineArchiveName}` : ""} · `}
+                                {`线下 · ${offlineArchiveName || DEFAULT_CHAT_OFFLINE_ARCHIVE_NAME} · `}
                             </button>
                         ) : ""}
                         {session.isGroup
@@ -5567,7 +5581,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     <div className="chat-offline-body">
                         <div className="flex items-center justify-center gap-2">
                             <span className="chat-sys-msg">
-                                {`线下存档：${offlineArchiveName || "默认存档"}`}
+                                {`线下存档：${offlineArchiveName || DEFAULT_CHAT_OFFLINE_ARCHIVE_NAME}`}
+                                {offlineTurns.length > 0 ? ` · 已自动保存 ${offlineTurns.length} 轮` : ""}
                             </span>
                             <button
                                 type="button"

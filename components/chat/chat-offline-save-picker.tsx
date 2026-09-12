@@ -1,9 +1,10 @@
 "use client";
 
-// 线下存档选择器：进入线下模式前先在这里「选择存档 / 新增存档」，
-// 选定后由聊天室带着 archiveId 进入线下（见 chat-room.enterOfflineMode）。
-// 每个会话的存档互相独立；老数据（没有存档登记的线下记录）在
-// loadChatOfflineArchives 首次调用时会被就地登记为「默认存档」。
+// 线下存档选择器：选择 / 新增 / 重命名 / 删除线下存档，选中后进入线下
+// （见 chat-room.enterOfflineMode）。
+// 线下内容每轮生成后都会自动写进「当前存档」，不需要手动保存；本面板负责的是
+// 「进哪一份存档、以及把现有内容另存一份」。老数据（还没被登记过的线下记录）
+// 会由 loadChatOfflineArchives 自动登记成「已有内容」存档，不会丢。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, MoreHorizontal, Trash2, X } from "lucide-react";
@@ -15,6 +16,7 @@ import {
     type ChatOfflineArchive,
 } from "@/lib/chat-offline-storage";
 import { formatChatUiTime } from "@/lib/chat-time";
+import { Toggle } from "@/components/ui/form";
 
 /** 请求打开线下存档选择器（聊天信息页 → 线下存档 用；聊天室监听后弹出） */
 export const CHAT_OPEN_OFFLINE_SAVES_EVENT = "chat-open-offline-saves";
@@ -47,6 +49,8 @@ export function ChatOfflineSavePicker({
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameDraft, setRenameDraft] = useState("");
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+    // 新建存档时是否顺带把现有内容复制进去（默认开：用户的诉求是「别让内容无处安放」）
+    const [copySource, setCopySource] = useState(true);
 
     const reload = useCallback(() => {
         setArchives(loadChatOfflineArchives(sessionId));
@@ -56,16 +60,26 @@ export function ChatOfflineSavePicker({
 
     const suggestedName = useMemo(() => `存档 ${archives.length + 1}`, [archives.length]);
 
+    // 可继承的源：优先当前使用的存档（有内容时），否则第一份有内容的存档
+    const copyCandidate = useMemo(() => {
+        const active = activeArchiveId ? archives.find(item => item.id === activeArchiveId) : null;
+        if (active && active.turnCount > 0) return active;
+        return archives.find(item => item.turnCount > 0) || null;
+    }, [archives, activeArchiveId]);
+
     const startCreate = () => {
         setMenuId(null);
         setRenamingId(null);
         setConfirmDeleteId(null);
         setDraftName(suggestedName);
+        setCopySource(Boolean(copyCandidate));
         setCreating(true);
     };
 
     const handleCreate = () => {
-        const archive = createChatOfflineArchive(sessionId, draftName.trim() || suggestedName);
+        const archive = createChatOfflineArchive(sessionId, draftName.trim() || suggestedName, {
+            copyFromArchiveId: copySource && copyCandidate ? copyCandidate.id : undefined,
+        });
         setCreating(false);
         setDraftName("");
         reload();
@@ -203,7 +217,7 @@ export function ChatOfflineSavePicker({
                     <div className="flex flex-col gap-1 min-w-0">
                         <span className="menu-label">线下存档</span>
                         <span className="menu-desc !mt-0 truncate">
-                            {sessionTitle ? `${sessionTitle} · ` : ""}选择一份存档继续，或新建一份从头开始
+                            {sessionTitle ? `${sessionTitle} · ` : ""}线下内容每轮都会自动存进当前存档
                         </span>
                     </div>
                     <button
@@ -223,20 +237,32 @@ export function ChatOfflineSavePicker({
                 </div>
 
                 {creating ? (
-                    <div className="flex items-center gap-2 rounded-2xl border border-[var(--c-accent)] bg-[var(--c-input)]/70 px-3 py-2">
-                        <input
-                            autoFocus
-                            value={draftName}
-                            onChange={e => setDraftName(e.target.value)}
-                            placeholder={suggestedName}
-                            onKeyDown={e => {
-                                if (e.key === "Enter") handleCreate();
-                                if (e.key === "Escape") { setCreating(false); setDraftName(""); }
-                            }}
-                            className="flex-1 min-w-0 bg-transparent outline-none ts-14 text-[var(--c-text)]"
-                        />
-                        <button type="button" className="ui-btn ui-btn-primary" onClick={handleCreate}>创建并开始</button>
-                        <button type="button" className="ui-btn ui-btn-outline" onClick={() => { setCreating(false); setDraftName(""); }}>取消</button>
+                    <div className="flex flex-col gap-2 rounded-2xl border border-[var(--c-accent)] bg-[var(--c-input)]/70 px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                            <input
+                                autoFocus
+                                value={draftName}
+                                onChange={e => setDraftName(e.target.value)}
+                                placeholder={suggestedName}
+                                onKeyDown={e => {
+                                    if (e.key === "Enter") handleCreate();
+                                    if (e.key === "Escape") { setCreating(false); setDraftName(""); }
+                                }}
+                                className="flex-1 min-w-0 bg-transparent outline-none ts-14 text-[var(--c-text)]"
+                            />
+                            <button type="button" className="ui-btn ui-btn-primary" onClick={handleCreate}>创建并开始</button>
+                            <button type="button" className="ui-btn ui-btn-outline" onClick={() => { setCreating(false); setDraftName(""); }}>取消</button>
+                        </div>
+                        {copyCandidate && copyCandidate.turnCount > 0 && (
+                            <div className="flex items-center gap-2">
+                                <div className="menu-label-group flex-1 min-w-0">
+                                    <span className="menu-desc !mt-0">
+                                        带上「{copyCandidate.name}」的 {copyCandidate.turnCount} 轮记录（复制成独立的一份）
+                                    </span>
+                                </div>
+                                <Toggle checked={copySource} onChange={setCopySource} />
+                            </div>
+                        )}
                     </div>
                 ) : (
                     <button

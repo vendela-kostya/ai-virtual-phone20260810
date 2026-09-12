@@ -1112,7 +1112,7 @@ export function ChatSettingsPanel({
                                 <span className="menu-desc">
                                     {offlineHistoryBusy
                                         ? "线下回复生成中，完成后再切换"
-                                        : "选择 / 新增 / 删除存档，进入线下前先选一份"}
+                                        : "已自动保存，点此查看 / 新增 / 切换存档"}
                                 </span>
                             </div>
                             <div className="menu-right"><ChevronRight size={16} /></div>
@@ -1293,7 +1293,7 @@ export function ChatSettingsPanel({
                         <div className="menu-label-group">
                             <span className="menu-label menu-label-danger">清空线下聊天记录</span>
                             <span className="menu-desc">
-                                {offlineHistoryBusy ? "线下回复生成中，完成后再清空" : "同步移除该会话的线下短期记忆事件"}
+                                {offlineHistoryBusy ? "线下回复生成中，完成后再清空" : "清掉全部线下存档，并同步移除对应短期记忆事件"}
                             </span>
                         </div>
                     </button>
@@ -1516,7 +1516,7 @@ export function ChatSettingsPanel({
             {showConfirmClearOffline && (
                 <ConfirmDialog
                     title="确定要清空线下聊天记录吗？"
-                    message="会同步移除该会话的线下短期记忆事件，不影响线上聊天与已保存的长期记忆。清空后无法恢复。是否继续？"
+                    message="会清掉这个会话的全部线下存档（含「已有内容」），并同步移除对应的线下短期记忆事件；不影响线上聊天与已保存的长期记忆。清空后无法恢复。是否继续？"
                     icon={AlertCircle}
                     variant="danger"
                     confirmLabel="清空"

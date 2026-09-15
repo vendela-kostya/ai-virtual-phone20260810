@@ -291,6 +291,10 @@ const CHAT_THEATER_MODE_PREFIX = "chat-theater-mode:";
 const GENERATING_LOCK_TTL_MS = 5 * 60 * 1000;
 const OFFLINE_INITIAL_LOAD = 10;
 const OFFLINE_LOAD_MORE_COUNT = 10;
+/** 多选删除的单次上限：勾选与实际删除都不超过这个数。
+ *  实际删除会吞掉「相邻已选之间的隐藏历史」（工具调用等不显示的消息），
+ *  所以上限同时卡在最终删除集上，否则勾 100 条可能删掉更多。 */
+const MULTI_SELECT_MAX = 100;
 
 type PendingNativeToolCall = {
     id: string;
@@ -5093,6 +5097,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     >编辑</button>
                     <button
                         onClick={() => {
+                            startMultiSelectFromMessage(msg);
+                        }}
+                        className="ctx-menu-btn"
+                    >多选</button>
+                    <button
+                        onClick={() => {
                             handleDeleteMessage(storedMessageId);
                             closeContextMenu();
                         }}
@@ -5356,9 +5366,18 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     const toggleMultiSelectedMessage = useCallback((messageId: string) => {
         setSelectedMessageIds(prev => {
+            if (prev.has(messageId)) {
+                const next = new Set(prev);
+                next.delete(messageId);
+                return next;
+            }
+            // 上限在勾选这一步就卡住：先到上限再让用户去删，比删的时候才拒绝体验好
+            if (prev.size >= MULTI_SELECT_MAX) {
+                showChatToast(`一次最多选择 ${MULTI_SELECT_MAX} 条，请先删除或取消部分选择`, 3000);
+                return prev;
+            }
             const next = new Set(prev);
-            if (next.has(messageId)) next.delete(messageId);
-            else next.add(messageId);
+            next.add(messageId);
             return next;
         });
     }, []);
@@ -5374,9 +5393,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setSelectedMessageIds(new Set([storedId]));
     }, [getSelectableStoredMessageId]);
 
+    // 勾选没超上限，但吞掉中间的隐藏历史后可能超：这种要明确拒绝并说清原因，
+    // 否则用户以为只删了 100 条，实际删掉更多
+    const multiDeleteOverLimit = multiDeleteTargetIds.length > MULTI_SELECT_MAX;
+
     const confirmMultiDelete = useCallback(() => {
         if (multiDeleteTargetIds.length === 0) {
             showChatToast("请选择要删除的消息");
+            return;
+        }
+        if (multiDeleteTargetIds.length > MULTI_SELECT_MAX) {
+            showChatToast(`实际删除会达到 ${multiDeleteTargetIds.length} 条，超过单次 ${MULTI_SELECT_MAX} 条上限，请减少选择`, 3200);
             return;
         }
         setShowConfirmMultiDelete(true);
@@ -6322,11 +6349,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         <X size={20} strokeWidth={1.8} />
                     </button>
                     <div className="chat-multi-select-summary">
-                        <strong>已选 {selectedMessageIds.size} 条</strong>
+                        <strong>已选 {selectedMessageIds.size} / {MULTI_SELECT_MAX} 条</strong>
                         <span>
-                            {multiDeleteTargetIds.length > selectedMessageIds.size
-                                ? `实际删除 ${multiDeleteTargetIds.length} 条，含隐藏历史`
-                                : `实际删除 ${multiDeleteTargetIds.length} 条`}
+                            {multiDeleteOverLimit
+                                ? `实际删除 ${multiDeleteTargetIds.length} 条，超出上限，请减少选择`
+                                : multiDeleteTargetIds.length > selectedMessageIds.size
+                                    ? `实际删除 ${multiDeleteTargetIds.length} 条，含隐藏历史`
+                                    : `实际删除 ${multiDeleteTargetIds.length} 条`}
                         </span>
                     </div>
                     <button

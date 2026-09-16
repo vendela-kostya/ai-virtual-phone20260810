@@ -295,8 +295,8 @@ const OFFLINE_INITIAL_LOAD = 10;
 const OFFLINE_LOAD_MORE_COUNT = 10;
 /** 多选删除的单次上限：勾选与实际删除都不超过这个数。
  *  实际删除会吞掉「相邻已选之间的隐藏历史」（工具调用等不显示的消息），
- *  所以上限同时卡在最终删除集上，否则勾 100 条可能删掉更多。 */
-const MULTI_SELECT_MAX = 100;
+ *  所以上限同时卡在最终删除集上，否则勾 1000 条可能删掉更多。 */
+const MULTI_SELECT_MAX = 1000;
 
 type PendingNativeToolCall = {
     id: string;

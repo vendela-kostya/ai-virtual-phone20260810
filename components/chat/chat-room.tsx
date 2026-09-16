@@ -4873,6 +4873,14 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             return;
         }
 
+        // 本地删除只能执行一次；云端失败时也要补跑，所以用标志位守住
+        let localApplied = false;
+        const runLocalDelete = () => {
+            if (localApplied) return;
+            localApplied = true;
+            applyLocalDelete();
+        };
+
         setCloudDeletePending({ count: cloudTargetCount });
         try {
             const deletedCount = await withTimeout(
@@ -4883,7 +4891,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             if (deletedCount < cloudTargetCount) {
                 throw new Error("云端记录没有完全删除，请检查同步设置后重试。");
             }
-            applyLocalDelete();
+            runLocalDelete();
             if (successText) showChatToast(successText);
             // 删消息对象只解决"消息目录"这一半：删掉的历史早就烘焙进云端运行包的
             // bakedHistory 里，不重烘焙的话云端助手（微信）照样记得刚删的内容。
@@ -4894,7 +4902,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 });
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            showChatToast(`云端删除失败：${message}`, 3500);
+            // 云端删不掉不能连累本地：用户点的是「从我的聊天里删掉」，
+            // 云端没删干净可以提示、留给后续同步兜底，但绝不能让本地删除失效
+            // （此前本地删除挂在云端成功之后，云侧一旦报错就表现为"点了删除没反应"）。
+            runLocalDelete();
+            if (successText) showChatToast(successText);
+            showChatToast(`云端记录未完全删除：${message}`, 4000);
         } finally {
             setCloudDeletePending(null);
         }
@@ -5316,47 +5329,40 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         return id;
     }, []);
 
-    const visibleSelectableMessageIds = useMemo(() => {
-        const ids: string[] = [];
-        const seen = new Set<string>();
-        projectedMessages.forEach((msg, idx) => {
-            if (voiceCallGroups.memberSet.has(idx)) return;
-            const storedId = getSelectableStoredMessageId(msg);
-            if (!storedId || seen.has(storedId)) return;
-            const displayContent = getMessageDisplayContent(msg);
-            if (isHiddenChatFlowMessage(msg, displayContent)) return;
-            seen.add(storedId);
-            ids.push(storedId);
-        });
-        return ids;
-    }, [getMessageDisplayContent, getSelectableStoredMessageId, projectedMessages, voiceCallGroups.memberSet]);
-
+    /**
+     * 实际删除集 = 把「已选消息」按存储顺序排好后，逐段补齐两两之间的所有消息。
+     *
+     * 于是「只选第一条和最后一条」就等于删掉整段——这是用户明确要的语义
+     * （此前只对「相邻的两条已选」补中间，跨过多条可见消息时补不上，所以
+     * 选首尾两条只删了那两条）。补齐范围取存储索引区间，因此夹在中间的
+     * 隐藏历史（工具调用/结果等）也会一并清掉，不会留下半截上下文。
+     */
     const multiDeleteTargetIds = useMemo(() => {
         if (selectedMessageIds.size === 0) return [];
         const storedMessages = loadChatMessages(session.id);
         const storedIndexById = new Map(storedMessages.map((msg, index) => [msg.id, index]));
+        const selectedIndexes = [...new Set(
+            [...selectedMessageIds]
+                .map(id => storedIndexById.get(id))
+                .filter((index): index is number => index !== undefined),
+        )].sort((a, b) => a - b);
+        if (selectedIndexes.length === 0) return [];
+
         const targets = new Set<string>();
-
-        selectedMessageIds.forEach(id => {
-            if (storedIndexById.has(id)) targets.add(id);
-        });
-
-        for (let i = 0; i < visibleSelectableMessageIds.length - 1; i += 1) {
-            const leftId = visibleSelectableMessageIds[i];
-            const rightId = visibleSelectableMessageIds[i + 1];
-            if (!selectedMessageIds.has(leftId) || !selectedMessageIds.has(rightId)) continue;
-
-            const leftIndex = storedIndexById.get(leftId);
-            const rightIndex = storedIndexById.get(rightId);
-            if (leftIndex === undefined || rightIndex === undefined || rightIndex <= leftIndex) continue;
-
-            for (let storedIndex = leftIndex + 1; storedIndex < rightIndex; storedIndex += 1) {
-                targets.add(storedMessages[storedIndex].id);
+        for (let i = 0; i < selectedIndexes.length; i += 1) {
+            const startIndex = selectedIndexes[i];
+            const endIndex = i + 1 < selectedIndexes.length ? selectedIndexes[i + 1] : startIndex;
+            for (let storedIndex = startIndex; storedIndex <= endIndex; storedIndex += 1) {
+                const message = storedMessages[storedIndex];
+                if (message) targets.add(message.id);
             }
         }
 
         return [...targets];
-    }, [selectedMessageIds, session.id, visibleSelectableMessageIds]);
+    }, [selectedMessageIds, session.id]);
+
+    /** 区间补齐后被"顺带"纳入删除的条数（已选之外的），用于向用户说明范围 */
+    const multiDeleteFilledCount = Math.max(0, multiDeleteTargetIds.length - selectedMessageIds.size);
 
     const cancelMultiSelect = useCallback(() => {
         setIsMultiSelectMode(false);
@@ -5410,14 +5416,21 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     }, [multiDeleteTargetIds.length]);
 
     const handleMultiDeleteConfirmed = () => {
-        const targetIds = new Set(multiDeleteTargetIds);
+        // 先冻结本次要删的 id 列表：确认框弹出的这段时间里，多选状态可能被清掉
+        const idsToDelete = [...multiDeleteTargetIds];
+        const targetIds = new Set(idsToDelete);
         const targetMessages = loadChatMessages(session.id).filter(msg => targetIds.has(msg.id));
         setShowConfirmMultiDelete(false);
         void deleteWeixinCloudBeforeLocal(targetMessages, () => {
-            const deletedCount = deleteChatMessagesByIds(session.id, multiDeleteTargetIds);
+            const deletedCount = deleteChatMessagesByIds(session.id, idsToDelete);
             syncMessagesFromStorage();
             cancelMultiSelect();
-            if (deletedCount > 0) showChatToast(`已删除 ${deletedCount} 条历史`);
+            // 删 0 条也要出声：此前静默返回，用户看到的就是"点了删除没反应"
+            if (deletedCount > 0) {
+                showChatToast(`已删除 ${deletedCount} 条历史`);
+            } else {
+                showChatToast("这些消息已经不在记录里了，未做改动", 3200);
+            }
         });
     };
 
@@ -6349,13 +6362,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         <X size={20} strokeWidth={1.8} />
                     </button>
                     <div className="chat-multi-select-summary">
-                        <strong>已选 {selectedMessageIds.size} / {MULTI_SELECT_MAX} 条</strong>
+                        <strong>已选 {selectedMessageIds.size} 条 · 实际删除 {multiDeleteTargetIds.length} 条</strong>
                         <span>
                             {multiDeleteOverLimit
-                                ? `实际删除 ${multiDeleteTargetIds.length} 条，超出上限，请减少选择`
-                                : multiDeleteTargetIds.length > selectedMessageIds.size
-                                    ? `实际删除 ${multiDeleteTargetIds.length} 条，含隐藏历史`
-                                    : `实际删除 ${multiDeleteTargetIds.length} 条`}
+                                ? `首尾之间连带的条数使总数超过 ${MULTI_SELECT_MAX} 条上限，请缩短范围或分批删除`
+                                : multiDeleteFilledCount > 0
+                                    ? `含首尾之间连带的 ${multiDeleteFilledCount} 条（上限 ${MULTI_SELECT_MAX} 条）`
+                                    : `单次上限 ${MULTI_SELECT_MAX} 条`}
                         </span>
                     </div>
                     <button
@@ -6423,8 +6436,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 <ConfirmDialog
                     title="删除选中消息？"
                     message={
-                        multiDeleteTargetIds.length > selectedMessageIds.size
-                            ? `将删除已选消息，并一并删除相邻已选消息之间的隐藏历史。实际删除 ${multiDeleteTargetIds.length} 条，删除后无法恢复。`
+                        multiDeleteFilledCount > 0
+                            ? `将删除已选 ${selectedMessageIds.size} 条，并连带删除首尾之间的 ${multiDeleteFilledCount} 条消息，共 ${multiDeleteTargetIds.length} 条。删除后无法恢复。`
                             : `将删除已选的 ${multiDeleteTargetIds.length} 条消息，删除后无法恢复。`
                     }
                     icon={AlertCircle}

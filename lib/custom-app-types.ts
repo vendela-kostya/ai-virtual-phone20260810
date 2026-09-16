@@ -112,6 +112,12 @@ export type CustomAppChatPlusAction = {
 export type CustomAppChatMessageAction = CustomAppExtensionEntry & {
   mediaTypes?: string[];
   roles?: string[];
+  /**
+   * true = 这条动作在「多选消息」工具栏里显示，点击时把当前选中的消息整批交给 APP
+   * （launchContext.source = "chat_multi_select"，携带 selectedMessages）。
+   * 缺省/false = 只作为单条消息的动作（当前宿主尚未渲染单条入口，预留）。
+   */
+  multiSelect?: boolean;
 };
 
 export type CustomAppChatCardAction = CustomAppExtensionEntry & {

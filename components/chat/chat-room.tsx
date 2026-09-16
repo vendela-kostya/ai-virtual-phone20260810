@@ -30,6 +30,8 @@ import { createPortal } from "react-dom";
 import { loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
 import { loadCustomAppChatPlusActions, type RegisteredCustomAppChatPlusAction } from "@/lib/custom-app-chat-directives";
+import { loadCustomAppChatMessageActions } from "@/lib/custom-app-sdk-registry";
+import type { CustomAppChatMessageAction } from "@/lib/custom-app-types";
 import { CUSTOM_APPS_UPDATED_EVENT, getInstalledCustomApp } from "@/lib/custom-app-storage";
 import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
 import { CustomAppRunner } from "@/components/app-market/custom-app-runner";
@@ -577,6 +579,13 @@ function SystemInstructionCard({ content }: { content: string }) {
 }
 
 type CustomChatPlusPresentation = "panel" | "modal" | "fullscreen" | "none";
+
+/** 已注册到「多选消息」工具栏的 APP 消息动作 */
+type RegisteredMultiSelectAction = CustomAppChatMessageAction & {
+    appId: string;
+    appName: string;
+    appIconDataUrl?: string;
+};
 
 type ActiveCustomChatPlus = {
     app: InstalledCustomApp;
@@ -1129,6 +1138,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const [cloudDeletePending, setCloudDeletePending] = useState<{ count: number } | null>(null);
     const [showPlusMenu, setShowPlusMenu] = useState(false);
     const [customPlusActions, setCustomPlusActions] = useState<RegisteredCustomAppChatPlusAction[]>(() => loadCustomAppChatPlusActions());
+    // 已安装 APP 声明到「多选消息」工具栏的动作（extensions.chat.messageActions + multiSelect: true）
+    const [customMultiSelectActions, setCustomMultiSelectActions] = useState<RegisteredMultiSelectAction[]>(
+        () => loadCustomAppChatMessageActions().filter(action => action.multiSelect === true) as RegisteredMultiSelectAction[],
+    );
     const [activeCustomChatPlus, setActiveCustomChatPlus] = useState<ActiveCustomChatPlus | null>(null);
     const [showSettings, setShowSettings] = useState(false);
     const [showVoiceCall, setShowVoiceCall] = useState(false);
@@ -1161,8 +1174,15 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     useEffect(() => {
         const syncCustomPlusActions = () => setCustomPlusActions(loadCustomAppChatPlusActions());
+        const syncCustomMultiSelectActions = () => setCustomMultiSelectActions(
+            loadCustomAppChatMessageActions().filter(action => action.multiSelect === true) as RegisteredMultiSelectAction[],
+        );
         window.addEventListener(CUSTOM_APPS_UPDATED_EVENT, syncCustomPlusActions);
-        return () => window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, syncCustomPlusActions);
+        window.addEventListener(CUSTOM_APPS_UPDATED_EVENT, syncCustomMultiSelectActions);
+        return () => {
+            window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, syncCustomPlusActions);
+            window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, syncCustomMultiSelectActions);
+        };
     }, []);
 
     useEffect(() => {
@@ -5434,6 +5454,76 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         });
     };
 
+    /**
+     * 多选工具栏里的自定义 APP 动作：把当前选中的消息整批交给 APP。
+     * 只取用户真正勾选的那些（不做「首尾补齐」——那是删除的语义，
+     * 收藏/导出这类动作不该被迫带上没勾的消息）。
+     */
+    const handleOpenMultiSelectAction = (action: RegisteredMultiSelectAction) => {
+        if (selectedMessageIds.size === 0) {
+            showChatToast("请先选择要处理的消息");
+            return;
+        }
+        const app = getInstalledCustomApp(action.appId);
+        if (!app) {
+            showChatToast(`应用「${action.appName}」未安装或已卸载`);
+            return;
+        }
+        const idSet = new Set(selectedMessageIds);
+        const picked = loadChatMessages(session.id).filter(msg => idSet.has(msg.id));
+        if (picked.length === 0) {
+            showChatToast("选中的消息已经不在记录里了");
+            return;
+        }
+        const characterId = session.isGroup ? undefined : session.contactId;
+        const selectedMessages = picked.map(msg => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            createdAt: msg.createdAt,
+            mediaType: msg.mediaType,
+            // 只带轻量字段：媒体本体是 media-store 引用或大 dataURL，跨 iframe 传会拖慢通信桥
+            mediaData: msg.mediaData
+                ? { label: msg.mediaData.label, amount: msg.mediaData.amount, status: msg.mediaData.status }
+                : undefined,
+            senderName: msg.senderName,
+        }));
+        const presentation: Exclude<CustomChatPlusPresentation, "fullscreen"> = "panel";
+        // 复用「+ 号面板」的打开通道：把消息动作包成等价的 plus action 交给同一个运行层
+        const bridgeAction = {
+            id: action.id,
+            label: action.label,
+            description: action.description,
+            icon: action.icon,
+            entry: action.entry,
+            presentation,
+            panelHeight: "78vh",
+            data: action.data,
+            appId: action.appId,
+            appName: action.appName,
+            appIconDataUrl: action.appIconDataUrl,
+        } as RegisteredCustomAppChatPlusAction;
+        setActiveCustomChatPlus({
+            app,
+            action: bridgeAction,
+            presentation,
+            launchContext: {
+                source: "chat_multi_select",
+                actionId: action.id,
+                entry: action.entry,
+                sessionId: session.id,
+                characterId,
+                characterName: session.isGroup
+                    ? (session.groupName || "群聊")
+                    : (session.alias || character?.name || ""),
+                isGroup: !!session.isGroup,
+                selectedCount: selectedMessages.length,
+                selectedMessages,
+                data: action.data,
+            },
+        });
+    };
+
     /* Settings panel is rendered as an overlay (not early return) to preserve chat scroll position */
 
     const jumpToStoredMessage = useCallback((messageId: string) => {
@@ -6371,6 +6461,25 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                     : `单次上限 ${MULTI_SELECT_MAX} 条`}
                         </span>
                     </div>
+                    {customMultiSelectActions.length > 0 && (
+                        <div className="chat-multi-select-app-actions" style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                            {customMultiSelectActions.map(action => (
+                                <button
+                                    key={`${action.appId}:${action.id}`}
+                                    type="button"
+                                    className="chat-multi-select-delete-btn"
+                                    disabled={selectedMessageIds.size === 0}
+                                    onClick={() => handleOpenMultiSelectAction(action)}
+                                    title={action.description || action.label}
+                                >
+                                    {action.appIconDataUrl
+                                        ? <img src={action.appIconDataUrl} alt="" style={{ width: 18, height: 18, borderRadius: 5, objectFit: "cover" }} />
+                                        : <Blocks size={18} strokeWidth={1.8} />}
+                                    {action.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                     <button
                         type="button"
                         className="chat-multi-select-delete-btn"

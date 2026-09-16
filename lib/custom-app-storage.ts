@@ -398,6 +398,7 @@ function normalizeChatMessageAction(value: unknown): CustomAppChatMessageAction 
     ...base,
     mediaTypes: stringArray(record.mediaTypes ?? record.mediaType, 40, 20),
     roles: stringArray(record.roles ?? record.role, 40, 10),
+    multiSelect: record.multiSelect === true || record.multiSelect === "true" ? true : undefined,
   };
 }
 

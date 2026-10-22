@@ -44,7 +44,15 @@ const MEMORY_TOKEN_BUDGET_STEP: Record<MemoryBudgetKey, number> = {
     coreMemoryTokenBudget: 1000,
     longTermTokenBudget: 1000,
 };
+// 手动新增/编辑记忆的单条字数上限：核心记忆保持紧凑摘要的默认值，
+// 长期记忆允许写长文（100000 字），由下文的 token 预算负责注入截断
 const MANUAL_MEMORY_CONTENT_LIMIT = 3000;
+const MANUAL_MEMORY_CONTENT_LIMIT_LONG_TERM = 100000;
+const manualMemoryContentLimit = (type: MemoryEntry["type"]): number =>
+    type === "long_term" ? MANUAL_MEMORY_CONTENT_LIMIT_LONG_TERM : MANUAL_MEMORY_CONTENT_LIMIT;
+// 生成向量前截断文本：常见 embedding 模型输入上限约 8k token，
+// 超长记忆整条送去会直接报错、导致该条记忆没有向量
+const MANUAL_MEMORY_EMBEDDING_INPUT_CAP = 4000;
 // 详情页时间线最多解析渲染的条数：全量历史可能有几万条，
 // 一次性解析+渲染会把 iOS Safari 的单页内存顶爆（灰屏杀页）
 const MEMORY_TIMELINE_ENTRY_CAP = 2000;
@@ -480,7 +488,10 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
         const embeddingApiConfig = resolveAuxiliaryApiConfig("embeddingApiConfigId");
         if (!embeddingApiConfig || !resolveEmbeddingModel(embeddingApiConfig)) return undefined;
         try {
-            return await generateEmbedding(content, embeddingApiConfig) ?? undefined;
+            const embeddingInput = content.length > MANUAL_MEMORY_EMBEDDING_INPUT_CAP
+                ? content.slice(0, MANUAL_MEMORY_EMBEDDING_INPUT_CAP)
+                : content;
+            return await generateEmbedding(embeddingInput, embeddingApiConfig) ?? undefined;
         } catch {
             return undefined;
         }
@@ -503,8 +514,9 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
             showNotice("记忆内容不能为空");
             return;
         }
-        if (content.length > MANUAL_MEMORY_CONTENT_LIMIT) {
-            showNotice(`记忆内容过长，请控制在 ${MANUAL_MEMORY_CONTENT_LIMIT} 字以内`);
+        const contentLimit = manualMemoryContentLimit(memoryEditor.type);
+        if (content.length > contentLimit) {
+            showNotice(`记忆内容过长，请控制在 ${contentLimit} 字以内`);
             return;
         }
 
@@ -736,8 +748,9 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                     const placeholder = isCore
                         ? "记录稳定、长期影响角色判断的事实，例如关系身份、重大约定、长期设定。"
                         : "记录一次重要事件、承诺、偏好、关系变化，后续对话会参考。";
+                    const contentLimit = manualMemoryContentLimit(memoryEditor.type);
                     const contentLength = memoryEditor.content.trim().length;
-                    const overLimit = contentLength > MANUAL_MEMORY_CONTENT_LIMIT;
+                    const overLimit = contentLength > contentLimit;
                     return (
                         <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => savingMemory ? undefined : setMemoryEditor(null)}>
                             <div className="modal-sheet mem-edit-sheet" data-ui="modal-sheet" onClick={event => event.stopPropagation()}>
@@ -768,7 +781,7 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                                     />
                                     <div className={`mem-edit-footer ${overLimit ? "is-over-limit" : ""}`}>
                                         <span>{isCore ? "CORE" : "LONG TERM"}</span>
-                                        <span>{contentLength}/{MANUAL_MEMORY_CONTENT_LIMIT}</span>
+                                        <span>{contentLength}/{contentLimit}</span>
                                     </div>
                                     <button
                                         className="ui-btn ui-btn-primary mem-edit-save-btn"

@@ -44,9 +44,9 @@ const MEMORY_TOKEN_BUDGET_STEP: Record<MemoryBudgetKey, number> = {
     coreMemoryTokenBudget: 1000,
     longTermTokenBudget: 1000,
 };
-// 手动新增/编辑记忆的单条字数上限：核心记忆保持紧凑摘要的默认值，
+// 手动新增/编辑记忆的单条字数上限：核心记忆放宽到 70000 字，
 // 长期记忆允许写长文（100000 字），由下文的 token 预算负责注入截断
-const MANUAL_MEMORY_CONTENT_LIMIT = 3000;
+const MANUAL_MEMORY_CONTENT_LIMIT = 70000;
 const MANUAL_MEMORY_CONTENT_LIMIT_LONG_TERM = 100000;
 const manualMemoryContentLimit = (type: MemoryEntry["type"]): number =>
     type === "long_term" ? MANUAL_MEMORY_CONTENT_LIMIT_LONG_TERM : MANUAL_MEMORY_CONTENT_LIMIT;
